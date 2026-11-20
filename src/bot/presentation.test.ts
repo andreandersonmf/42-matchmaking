@@ -117,7 +117,7 @@ test('presença: Pronto/Sair no painel e só quem saiu ou expirou aparece para t
   assert.deepEqual(replaceable(value, 500).map(p => p.discordId), [playerId(3)]);
   assert.deepEqual(replaceable(value, 2_000).map(p => p.discordId), [playerId(3), playerId(4)]);
   const ids = matchPresentation(value).components.flatMap(row => row.toJSON().components.map(c => 'custom_id' in c ? c.custom_id : ''));
-  assert.ok(ids.includes('mm:m:42:ready') && ids.includes('mm:m:42:leave') && ids.includes('mm:m:42:sub'));
+  assert.ok(ids.includes('mm:m:42:ready') && !ids.includes('mm:m:42:leave') && ids.includes('mm:m:42:sub'));
   assert.deepEqual(parseCustomId(`mm:m:42:subin:${playerId(3)}`), { kind: 'subin', matchId: 42, outId: playerId(3) });
 });
 

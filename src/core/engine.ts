@@ -482,6 +482,8 @@ export class MatchmakingService implements ServiceContract {
       for (const player of selected) await this.run('DELETE FROM queue WHERE discord_id=?', player.discordId);
       // Sem votação de modo: os jogadores votam nos 2 capitães e eles montam os times no draft.
       this.resolveMode(match, 'captains');
+      // Primeiro só a presença: a votação de capitão abre quando os 12 confirmarem.
+      match.captainDeadline = null;
       await this.saveMatch(match);
       await this.audit(initiatorId, 'match.created', { matchId: match.id });
       return this.publicMatch(match);
@@ -567,6 +569,7 @@ export class MatchmakingService implements ServiceContract {
   async voteCaptain(id: number, voterId: string, candidateId: string): Promise<Match> {
     return this.transaction(async () => {
       const match = await this.readStored(id);
+      assert(match.status !== 'captains' || match.captainDeadline != null, 'A votação de capitão começa quando os 12 confirmarem presença.');
       assert(match.status === 'captains' && match.captainDeadline != null && this.now() < match.captainDeadline, 'A votação de capitão já terminou.');
       this.assertParticipant(match, voterId);
       const voter = match.players.find(player => player.discordId === voterId)!;
@@ -711,6 +714,12 @@ export class MatchmakingService implements ServiceContract {
     });
   }
 
+  private openCaptainVoteIfAllReady(match: StoredMatch) {
+    if (match.status === 'captains' && match.captainDeadline == null && match.players.every(player => player.ready)) {
+      match.captainDeadline = this.now() + CAPTAIN_VOTE_MS;
+    }
+  }
+
   async setReady(id: number, playerId: string): Promise<Match> {
     return this.transaction(async () => {
       const match = await this.readStored(id);
@@ -718,6 +727,7 @@ export class MatchmakingService implements ServiceContract {
       const player = match.players.find(p => p.discordId === playerId);
       assert(player && !player.left, 'Somente os jogadores desta partida podem confirmar presença.');
       player.ready = true;
+      this.openCaptainVoteIfAllReady(match);
       await this.saveMatch(match);
       return this.publicMatch(match);
     });
@@ -754,6 +764,7 @@ export class MatchmakingService implements ServiceContract {
         elo: player.elo, vip: player.vip, autofill: player.position !== slot.position, ready: true, left: false, mvpVotes: 0,
       });
       delete match.captainBallots?.[outId];
+      this.openCaptainVoteIfAllReady(match);
       await this.run('DELETE FROM queue WHERE discord_id=?', inId);
       await this.saveMatch(match);
       await this.audit(actorId, 'match.substitute', { matchId: id, outId, inId });

@@ -27,8 +27,8 @@ async function queued(service: MatchmakingService) {
 async function ready(service: MatchmakingService) {
   let match = await queued(service);
   // Cada um vota em si; o desempate escolhe os 2 capitães, que montam os times no draft.
-  for (const player of match.players) match = await service.voteCaptain(match.id, player.discordId, player.discordId);
   for (const player of match.players) match = await service.setReady(match.id, player.discordId);
+  for (const player of match.players) match = await service.voteCaptain(match.id, player.discordId, player.discordId);
   return draft(service, match);
 }
 
@@ -138,6 +138,7 @@ test('histórico filtra participante antes de paginar e conta todas as partidas'
   const { service, advance } = await fixture(24);
   try {
     let first = await queued(service);
+    for (const player of first.players) first = await service.setReady(first.id, player.discordId);
     for (const player of first.players) first = await service.voteCaptain(first.id, player.discordId, player.discordId);
     first = await draft(service, first);
     await service.startMatch(first.id, 'staff');
@@ -146,6 +147,7 @@ test('histórico filtra participante antes de paginar e conta todas as partidas'
     await service.tick();
     for (const player of (await service.listPlayers()).filter(p => !first.players.some(f => f.discordId === p.discordId))) await service.joinQueue(player.discordId);
     let second = await service.createMatch('staff', 'channel');
+    for (const player of second.players) second = await service.setReady(second.id, player.discordId);
     for (const player of second.players) second = await service.voteCaptain(second.id, player.discordId, player.discordId);
     second = await draft(service, second);
     await service.startMatch(second.id, 'staff');
@@ -187,6 +189,8 @@ test('jogadores votam e os 2 mais votados viram capitães e fazem o draft', asyn
     const match = await queued(service);
     assert.equal(match.status, 'captains');
     assert.equal(match.players.filter(p => p.team !== null).length, 0);
+    await assert.rejects(service.voteCaptain(match.id, '1', '5'), /confirmarem presença/);
+    for (const p of match.players) await service.setReady(match.id, p.discordId);
     await service.voteCaptain(match.id, '1', '5');
     await service.voteCaptain(match.id, '2', '5');
     await service.voteCaptain(match.id, '3', '9');
@@ -324,6 +328,7 @@ test('reinício recupera prazos e não duplica Elo já distribuído', async () =
       await service.completeLink(String(index), link.code);
     }
     const match = await queued(service);
+    for (const p of match.players) await service.setReady(match.id, p.discordId);
     await service.attachMessage(match.id, 'channel', 'message');
     service.close();
     time += 30_000;

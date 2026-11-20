@@ -110,6 +110,9 @@ export function matchPresentation(match: Match, siteUrl?: string, interactive = 
       ...(['balanced', 'captains', 'random'] as const).map(mode => new ButtonBuilder().setCustomId(`mm:m:${match.id}:mode:${mode}`)
         .setLabel(`${modeNames[mode]} · ${match.votes[mode]}`).setStyle(mode === 'balanced' ? ButtonStyle.Danger : ButtonStyle.Secondary).setDisabled(!interactive)),
     ));
+  } else if (match.status === 'captains' && match.captainDeadline == null && match.readyDeadline != null) {
+    // Primeira etapa: só a confirmação de presença. A votação de capitão abre quando os 12 confirmarem.
+    description.push('', '**CONFIRME SUA PRESENÇA NA PARTIDA.** Quando os 12 confirmarem, começa a votação de capitão.');
   } else if (match.status === 'captains') {
     const teams = match.mode === 'captains' ? [null] : (['A', 'B'] as const);
     description.push('', match.mode === 'captains'
@@ -187,17 +190,15 @@ export function matchPresentation(match: Match, siteUrl?: string, interactive = 
     }
   }
   embed.addFields({ name: 'COMPOSIÇÃO', value: `${match.players.length}/12 jogadores · ${match.players.filter(player => player.position === 'spiker').length} spikers + ${match.players.filter(player => player.position === 'setter').length} setters\nPor equipe: 4 spikers (S) + 2 setters (L). Capitão: [C].` });
-  if (['captains', 'drafting', 'ready'].includes(match.status) && match.readyDeadline != null) {
-    const waiting = match.players.filter(player => !player.ready);
+  const waiting = match.players.filter(player => !player.ready);
+  if (['captains', 'drafting', 'ready'].includes(match.status) && match.readyDeadline != null && waiting.length) {
     const swappable = replaceable(match);
-    embed.addFields({ name: `PRESENÇA · ${12 - waiting.length}/12`, value: waiting.length
-      ? `Faltam confirmar: ${waiting.map(player => `${text(player.robloxName, 20)}${player.left ? ' (saiu)' : ''}`).join(', ')}.\nQuem sair ou não confirmar ${relativeTime(match.readyDeadline)} pode ser trocado pelos capitães.`
-      : 'Todos confirmaram.' });
+    embed.addFields({ name: `PRESENÇA · ${12 - waiting.length}/12`,
+      value: `Faltam confirmar: ${waiting.map(player => `${text(player.robloxName, 20)}${player.left ? ' (saiu)' : ''}`).join(', ')}.\nQuem não confirmar ${relativeTime(match.readyDeadline)} pode ser trocado por alguém da fila.` });
     components.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder().setCustomId(`mm:m:${match.id}:ready`).setLabel('Pronto').setStyle(ButtonStyle.Success).setDisabled(!interactive),
-      new ButtonBuilder().setCustomId(`mm:m:${match.id}:leave`).setLabel('Sair da partida').setStyle(ButtonStyle.Secondary).setDisabled(!interactive)));
+      new ButtonBuilder().setCustomId(`mm:m:${match.id}:ready`).setLabel('CONFIRMAR PRESENÇA').setStyle(ButtonStyle.Success).setDisabled(!interactive)));
     if (swappable.length) components.push(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
-      new StringSelectMenuBuilder().setCustomId(`mm:m:${match.id}:sub`).setPlaceholder('Capitães: trocar jogador que saiu ou está inativo')
+      new StringSelectMenuBuilder().setCustomId(`mm:m:${match.id}:sub`).setPlaceholder('Trocar quem não confirmou (capitães ou staff)')
         .setMinValues(1).setMaxValues(1).setDisabled(!interactive).addOptions(swappable.map(player => ({
           label: plain(player.robloxName, 40), value: player.discordId, description: player.left ? 'Saiu da partida' : 'Não confirmou presença',
         })))));

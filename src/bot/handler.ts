@@ -95,6 +95,9 @@ export function createInteractionHandler(deps: HandlerDependencies): (interactio
         const created = await createRoom(guild, match, config.staffRoleId);
         await service.moveToRoom(match.id, created.id);
         room = ` Sala privada: <#${created.id}>.`;
+        const ids = match.players.map(player => player.discordId);
+        await created.send({ content: `${ids.map(id => `<@${id}>`).join(' ')}\n**Partida #${match.id}:** confirmem a presença no painel abaixo.`, allowedMentions: { users: ids } })
+          .catch(() => report('Não foi possível marcar os jogadores na sala da partida.'));
       } catch {
         report('Não foi possível criar a sala privada da partida; o painel fica no canal de resultados.');
       }
