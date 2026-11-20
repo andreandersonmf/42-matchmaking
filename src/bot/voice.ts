@@ -91,6 +91,16 @@ export async function syncCalls(guild: Guild, service: ServiceContract, staffRol
     }
   }
 
+  // Capitães podem marcar @everyone na sala da partida (para mandar o link do servidor).
+  for (const match of active) {
+    const room = guild.channels.cache.find((c): c is TextChannel => c.type === ChannelType.GuildText && c.name === roomName(match.id));
+    for (const captain of match.players.filter(player => player.isCaptain)) {
+      if (!room || room.permissionOverwrites.cache.get(captain.discordId)?.allow.has(P.MentionEveryone)) continue;
+      await room.permissionOverwrites.edit(captain.discordId, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true, MentionEveryone: true })
+        .catch(() => report(`Não foi possível dar permissão de @everyone ao capitão na ${room.name}.`));
+    }
+  }
+
   const rooms = new Set(active.map(match => roomName(match.id)));
   const stale: GuildBasedChannel[] = [
     ...[...calls].filter(([name, channel]) => !members.has(name) && !channel.members.size).map(([, channel]) => channel),

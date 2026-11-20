@@ -31,7 +31,7 @@ export async function startBot(): Promise<(() => void) | undefined> {
   const runtime = await import('../core/runtime.js');
   const service: ServiceContract = runtime.service;
   const avatars = new AvatarSync(runtime.service);
-  const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates], allowedMentions: NO_MENTIONS });
+  const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates, GatewayIntentBits.GuildMessages], allowedMentions: NO_MENTIONS });
   const transport = new DiscordTransport(client, config);
   const publisher = new Publisher(service, transport, config);
   const syncRoles = async (userId: string, elo: number): Promise<string | undefined> => {
@@ -75,6 +75,22 @@ export async function startBot(): Promise<(() => void) | undefined> {
   const runVoice = () => { void syncVoice().catch(error => console.warn(`Não foi possível sincronizar as calls das partidas.${errorDetail(error)}`)); };
   let voiceTimer: ReturnType<typeof setInterval> | undefined;
   const stop = () => { lifecycle.stop(); avatars.stop(); clearInterval(voiceTimer); client.destroy(); };
+  // A cada 5 mensagens na sala da partida, o painel é reenviado para ficar no fim do chat.
+  const roomMessages = new Map<string, number>();
+  client.on(Events.MessageCreate, message => {
+    if (message.author.bot || message.guildId !== config.guildId || !/^partida-\d+$/.test((message.channel as TextChannel).name ?? '')) return;
+    const count = (roomMessages.get(message.channelId) ?? 0) + 1;
+    roomMessages.set(message.channelId, count >= 5 ? 0 : count);
+    if (count < 5) return;
+    void (async () => {
+      const match = (await service.getActiveMatches()).find(active => active.channelId === message.channelId);
+      if (!match) return;
+      const old = match.messageId;
+      await service.moveToRoom(match.id, message.channelId);
+      await publisher.refreshMatch(match.id);
+      if (old) await message.channel.messages.delete(old).catch(() => undefined);
+    })().catch(error => console.warn(`Não foi possível reenviar o painel da partida.${errorDetail(error)}`));
+  });
   client.on(Events.VoiceStateUpdate, (_, state) => { if (state.guild.id === config.guildId && state.channel?.name.toLowerCase() === QUEUE_CALL) runVoice(); });
   client.on(Events.Error, () => console.warn('O cliente Discord encontrou uma falha de conexão.'));
   client.on(Events.ShardError, () => console.warn('A conexão com o Discord foi interrompida.'));
