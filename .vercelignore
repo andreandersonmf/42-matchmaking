@@ -1,0 +1,13 @@
+node_modules
+data
+build
+dist
+artifacts
+playwright-report
+test-results
+.env
+.env.*
+.discloudignore
+discloud.config
+*.zip
+smoke-*.mts

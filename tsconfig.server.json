@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmit": false,
+    "rootDir": "src",
+    "outDir": "build",
+    "lib": ["ES2023", "DOM"],
+    "types": ["node"],
+    "sourceMap": true
+  },
+  "include": ["src/core/**/*.ts", "src/server/**/*.ts", "src/bot/**/*.ts"],
+  "exclude": ["src/**/*.test.ts", "src/**/test-fixtures.ts"]
+}

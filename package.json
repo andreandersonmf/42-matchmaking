@@ -1,0 +1,49 @@
+{
+  "name": "4-2-matchmaking",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "tsx watch src/server/index.ts",
+    "dev:web": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && tsc -p tsconfig.server.json && vite build",
+    "start": "node build/server/index.js",
+    "bot": "node build/bot/index.js",
+    "bot:dev": "tsx src/bot/index.ts",
+    "bot:register": "node build/bot/register.js",
+    "test": "tsx --expose-gc --test src/core/*.test.ts src/server/*.test.ts src/bot/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "test:web": "playwright test",
+    "build:server": "node -e \"require('node:fs').rmSync('build',{recursive:true,force:true})\" && tsc -p tsconfig.server.json",
+    "zip:discloud": "npm run build:server && powershell -NoProfile -Command \"Compress-Archive -Path build,assets,package.json,package-lock.json,discloud.config -DestinationPath discloud-bot.zip -Force\""
+  },
+  "dependencies": {
+    "@fontsource/inter": "^5.2.8",
+    "@fontsource/space-grotesk": "^5.2.10",
+    "@libsql/client": "^0.18.0",
+    "@resvg/resvg-js": "2.6.2",
+    "discord.js": "^14.25.1",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "lucide-react": "^0.468.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "sharp": "^0.35.5"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.65.1",
+    "@types/express": "^5.0.5",
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "@vitejs/plugin-react": "^5.1.0",
+    "concurrently": "^9.2.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.2"
+  }
+}

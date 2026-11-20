@@ -1,0 +1,21 @@
+import 'dotenv/config';
+import { createClient } from '@libsql/client';
+import { MatchmakingService } from './src/core/engine.js';
+
+const TEST_ID = '999999999999999999';
+const service = new MatchmakingService(process.env.TURSO_URL!, { authToken: process.env.TURSO_AUTH_TOKEN, ownerId: process.env.DISCORD_OWNER_ID });
+console.log('antes: players =', (await service.listPlayers()).length, '| matches =', await service.countMatches());
+const link = await service.beginLink(TEST_ID, 'Smoke', '42424242', 'Smoke_Roblox', 'spiker');
+console.log('beginLink ok:', link.code.slice(0, 6));
+const player = await service.completeLink(TEST_ID, `Descrição ${link.code}`);
+console.log('completeLink ok: elo', player.elo, '| posição', player.position);
+console.log('depois: players =', (await service.listPlayers()).length);
+const profile = await service.getProfile(TEST_ID);
+console.log('getProfile ok: nome', profile?.player.name, '| histórico', profile?.history.length);
+service.close();
+const raw = createClient({ url: process.env.TURSO_URL!, authToken: process.env.TURSO_AUTH_TOKEN });
+await raw.execute({ sql: 'DELETE FROM links WHERE discord_id = ?', args: [TEST_ID] });
+await raw.execute({ sql: 'DELETE FROM elo_events WHERE discord_id = ?', args: [TEST_ID] });
+await raw.execute({ sql: 'DELETE FROM players WHERE discord_id = ?', args: [TEST_ID] });
+console.log('limpeza ok: players =', (await raw.execute('SELECT COUNT(*) AS total FROM players')).rows[0].total);
+raw.close();
