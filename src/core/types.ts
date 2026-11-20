@@ -166,6 +166,7 @@ export interface ServiceContract {
   listPlayers(): Promise<RankedPlayer[]>;
   getProfile(discordId: string): Promise<PlayerProfile | null>;
   beginLink(discordId: string, name: string, robloxId: string, robloxName: string, position: Position): Promise<LinkChallenge>;
+  manualLink(actorId: string, discordId: string, name: string, robloxId: string, robloxName: string, position: Position): Promise<Player>;
   getLink(discordId: string): Promise<LinkChallenge | null>;
   completeLink(discordId: string, robloxDescription: string): Promise<Player>;
   setPosition(discordId: string, position: Position): Promise<Player>;

@@ -108,7 +108,7 @@ export function createInteractionHandler(deps: HandlerDependencies): (interactio
     const { options, user } = interaction;
     const name = interaction.commandName;
     let actor: Actor | undefined;
-    if (['setup', 'iniciar', 'finalizar', 'cancelar', 'vip', 'ajustar-elo'].includes(name)) {
+    if (['setup', 'iniciar', 'finalizar', 'cancelar', 'vip', 'ajustar-elo', 'verificar-manual'].includes(name)) {
       actor = await deps.resolveActor(interaction);
       if (name === 'ajustar-elo') requireOwner(actor, config);
       else requireStaff(actor, config);
@@ -206,6 +206,18 @@ export function createInteractionHandler(deps: HandlerDependencies): (interactio
         const player = await service.grantVip(actor!.id, target.id, tier as VipTier, days);
         await updateQueue();
         await info(interaction, 'PLANO ATUALIZADO', `**${text(player.robloxName)}** · **${vipNames[player.vip]}**${player.vip !== 'none' ? ` · expira ${relativeTime(player.vipExpiresAt)}` : ''}.\nA alteração foi registrada pela engine.`);
+        return;
+      }
+      case 'verificar-manual': {
+        const target = options.getUser('usuario', true);
+        const robloxId = options.getString('id', true).trim();
+        const roblox = await (deps.lookup ?? lookupUsername)(options.getString('roblox', true).trim());
+        if (roblox.id !== robloxId) throw new BotError(`O ID não bate com o nick: **${text(roblox.name)}** tem o ID ${roblox.id}. Confira e tente de novo.`);
+        const player = await service.manualLink(actor!.id, target.id, target.globalName ?? target.username, roblox.id, roblox.name, position(options.getString('posicao', true)));
+        const note = deps.applyVerification ? await deps.applyVerification(target.id, player) : undefined;
+        void Promise.resolve(deps.refreshAvatar?.(player.robloxId)).catch(() => undefined);
+        await info(interaction, 'JOGADOR VERIFICADO', `**${text(player.robloxName)}** (ID ${player.robloxId}) foi vinculado a <@${target.id}> pela staff.${note ? `
+${note}` : ''}`);
         return;
       }
       case 'ajustar-elo': {

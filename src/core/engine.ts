@@ -303,6 +303,16 @@ export class MatchmakingService implements ServiceContract {
     return { player, history, eloHistory: events.reverse() };
   }
 
+  /** Staff verifica alguém sem o código na descrição do Roblox (o bot confere nick e ID antes). */
+  async manualLink(actorId: string, discordId: string, name: string, robloxId: string, robloxName: string, position: Position): Promise<Player> {
+    return this.transaction(async () => {
+      const challenge = await this.beginLink(discordId, name, robloxId, robloxName, position);
+      const player = await this.completeLink(discordId, challenge.code);
+      await this.audit(actorId, 'player.manual_link', { discordId, robloxId, robloxName });
+      return player;
+    });
+  }
+
   async beginLink(discordId: string, name: string, robloxId: string, robloxName: string, position: Position): Promise<LinkChallenge> {
     return this.transaction(async () => {
       assert(!await this.getPlayer(discordId), 'Sua conta já está vinculada. Use /posicao para mudar sua função.');

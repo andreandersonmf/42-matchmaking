@@ -26,6 +26,11 @@ export const commands = [
     .addUserOption(o => o.setName('usuario').setDescription('Jogador cadastrado.').setRequired(true))
     .addStringOption(o => o.setName('plano').setDescription('Plano a conceder ou remover.').setRequired(true).addChoices({ name: 'Sem VIP', value: 'none' }, { name: 'VIP', value: 'vip' }, { name: 'VIP+', value: 'vip_plus' }))
     .addIntegerOption(o => o.setName('dias').setDescription('Duração de 1 a 365 dias.').setRequired(true).setMinValue(1).setMaxValue(365)),
+  command('verificar-manual', 'Staff: verifique um jogador pelo nick e ID do Roblox, sem código na descrição.')
+    .addUserOption(o => o.setName('usuario').setDescription('Membro do Discord.').setRequired(true))
+    .addStringOption(o => o.setName('roblox').setDescription('Nome de usuário Roblox, não o nome de exibição.').setRequired(true).setMinLength(3).setMaxLength(20))
+    .addStringOption(o => o.setName('id').setDescription('ID numérico da conta Roblox.').setRequired(true).setMinLength(1).setMaxLength(16))
+    .addStringOption(o => o.setName('posicao').setDescription('Posição principal.').setRequired(true).addChoices({ name: 'Spiker', value: 'spiker' }, { name: 'Setter', value: 'setter' })),
   command('ajustar-elo', 'Dono: ajuste o Elo de um jogador com motivo auditado.')
     .addUserOption(o => o.setName('usuario').setDescription('Jogador cadastrado.').setRequired(true))
     .addIntegerOption(o => o.setName('quantidade').setDescription('Variação entre -500 e 500.').setRequired(true).setMinValue(-500).setMaxValue(500))

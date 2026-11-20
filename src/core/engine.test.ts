@@ -550,3 +550,14 @@ test('denúncia: perda de Elo não passa de zero; empate vai para o admin', asyn
     await assert.rejects(service.decideReport(tie.id, 'admin', 'innocent'), /já foi encerrado/);
   } finally { service.close(); }
 });
+
+test('staff verifica manualmente pelo nick e ID, sem código, e não duplica conta Roblox', async () => {
+  const { service } = await fixture(0);
+  try {
+    const player = await service.manualLink('staff', '50', 'Manual', '777', 'NickRoblox', 'setter');
+    assert.equal(player.robloxName, 'NickRoblox');
+    assert.equal(player.position, 'setter');
+    assert.equal(player.elo, 200);
+    await assert.rejects(service.manualLink('staff', '51', 'Outro', '777', 'NickRoblox', 'spiker'), /já está vinculada/);
+  } finally { service.close(); }
+});

@@ -49,7 +49,7 @@ test('erros internos nunca expõem stacks, SQL ou segredos', () => {
 });
 
 test('registro explícito contém comandos, limites e não bloqueia staff por cargo', () => {
-  assert.deepEqual(commandData.map(command => command.name), ['register', 'verificar', 'posicao', 'fila', 'sair', 'setup', 'iniciar', 'finalizar', 'cancelar', 'profile', 'ranking', 'vip', 'ajustar-elo']);
+  assert.deepEqual(commandData.map(command => command.name), ['register', 'verificar', 'posicao', 'fila', 'sair', 'setup', 'iniciar', 'finalizar', 'cancelar', 'profile', 'ranking', 'vip', 'verificar-manual', 'ajustar-elo']);
   for (const command of commandData) {
     assert.equal(command.dm_permission, false);
     assert.equal(command.default_member_permissions, undefined);
