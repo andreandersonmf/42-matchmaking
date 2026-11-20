@@ -213,6 +213,14 @@ export function createInteractionHandler(deps: HandlerDependencies): (interactio
         const robloxId = options.getString('id', true).trim();
         const roblox = await (deps.lookup ?? lookupUsername)(options.getString('roblox', true).trim());
         if (roblox.id !== robloxId) throw new BotError(`O ID não bate com o nick: **${text(roblox.name)}** tem o ID ${roblox.id}. Confira e tente de novo.`);
+        const existing = await service.getPlayer(target.id);
+        if (existing) {
+          // Já cadastrado: só reaplica cargo de verificado, rank e apelido (o caso de quem ficou sem cargo).
+          if (existing.robloxId !== roblox.id) throw new BotError(`<@${target.id}> já está vinculado a outra conta Roblox: **${text(existing.robloxName)}** (ID ${existing.robloxId}).`);
+          const note = deps.applyVerification ? await deps.applyVerification(target.id, existing) : undefined;
+          await info(interaction, 'CARGOS REAPLICADOS', `<@${target.id}> já estava vinculado a **${text(existing.robloxName)}**. Cargo de verificado, rank e apelido foram aplicados de novo.${note ? `\n${note}` : ''}`);
+          return;
+        }
         const player = await service.manualLink(actor!.id, target.id, target.globalName ?? target.username, roblox.id, roblox.name, position(options.getString('posicao', true)));
         const note = deps.applyVerification ? await deps.applyVerification(target.id, player) : undefined;
         void Promise.resolve(deps.refreshAvatar?.(player.robloxId)).catch(() => undefined);
