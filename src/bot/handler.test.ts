@@ -20,7 +20,8 @@ function interaction(kind: 'command' | 'button' | 'select', name: string, id = p
     user: { id, username: 'DiscordName', globalName: 'Nome Discord' },
     message: { id: messageId }, values: [] as string[], deferred: false, replied: false,
     options: { getString: (key: string) => options[key] ?? null, getInteger: (key: string) => options[key] ?? null, getUser: (key: string) => options[key] ?? null },
-    isChatInputCommand: () => kind === 'command', isButton: () => kind === 'button', isStringSelectMenu: () => kind === 'select',
+    isChatInputCommand: () => kind === 'command', isButton: () => kind === 'button', isStringSelectMenu: () => kind === 'select', isModalSubmit: () => false,
+    modals: [] as unknown[], showModal: async (modal: unknown) => { value.modals.push(modal); value.replied = true; },
     inGuild: () => value.guildId !== null,
     deferReply: async (payload: Reply) => { deferred.push(payload); value.deferred = true; },
     reply: async (payload: Reply) => { replies.push(payload); value.replied = true; },
@@ -253,4 +254,36 @@ test('capitães: os 12 jogadores votam pelo painel atual; capitão pode iniciar 
   const captain = interaction('button', 'mm:m:42:start', playerId(2));
   await handler({ getMatch: async () => ready, startMatch: async (...args) => { started.push(args); return ready; } }, { id: playerId(2), roles: [], permissions: 0n }).run(captain.event);
   assert.deepEqual(started, [[42, playerId(2)]]);
+});
+
+test('denúncia: botão só para os 12; menu lista os outros 11; escolher abre o formulário sem defer', async () => {
+  const live = match({ status: 'live' });
+  const { run } = handler({ getMatch: async () => live });
+  const outsider = interaction('button', 'mm:m:42:report', config.ownerId);
+  await run(outsider.event);
+  assert.match(outsider.body(), /Somente os 12/);
+  const click = interaction('button', 'mm:m:42:report', playerId(1));
+  click.value.message.id = 'outra-mensagem';
+  await run(click.event);
+  const menu = (click.replies.at(-1) as { components: { toJSON(): { components: { custom_id: string; options: unknown[] }[] } }[] }).components[0].toJSON().components[0];
+  assert.equal(menu.custom_id, 'mm:m:42:reportpick');
+  assert.equal(menu.options.length, 11);
+  const pick = interaction('select', 'mm:m:42:reportpick', playerId(1));
+  pick.value.values = [playerId(0)];
+  await run(pick.event);
+  assert.equal(pick.deferred.length, 0);
+  assert.equal(pick.value.modals.length, 1);
+  assert.equal((pick.value.modals[0] as { toJSON(): { custom_id: string } }).toJSON().custom_id, `mm:r:42:${playerId(0)}`);
+});
+
+test('denúncia: só o Conselho vota no ticket', async () => {
+  let votes = 0;
+  const ticket = { id: 1, status: 'open' as const, matchId: 42, accusedId: playerId(0), reporters: [], ballots: {}, verdict: null, decidedBy: null, closedBy: null, channelId: config.matchChannelId!, messageId, createdAt: 0, closedAt: null };
+  const { run } = handler({ getReport: async () => ticket, voteReport: async () => { votes++; return ticket; } });
+  const vote = interaction('select', 'mm:t:1:vote', playerId(5));
+  vote.value.values = ['warning'];
+  Object.assign(vote.value, { guild: { roles: { cache: { find: () => ({ id: '100000000000000099' }) } } } });
+  await run(vote.event);
+  assert.match(vote.body(), /Membro do Conselho/);
+  assert.equal(votes, 0);
 });

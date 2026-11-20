@@ -75,3 +75,13 @@ test('valida env por nomes exatos sem expor valores', () => {
   assert.equal(safeSiteUrl('https://example.com/ranking'), 'https://example.com/ranking');
   for (const url of ['javascript:alert(1)', 'data:text/html,x', 'https://user:pass@example.com', 'not-a-url']) assert.equal(safeSiteUrl(url), undefined);
 });
+
+test('ids de denúncia: botão, menu, formulário e ticket', () => {
+  assert.deepEqual(parseCustomId('mm:m:42:report'), { kind: 'report', matchId: 42 });
+  assert.deepEqual(parseCustomId('mm:m:42:reportpick'), { kind: 'reportpick', matchId: 42 });
+  assert.deepEqual(parseCustomId(`mm:r:42:${playerId(3)}`), { kind: 'reportform', matchId: 42, accusedId: playerId(3) });
+  assert.deepEqual(parseCustomId('mm:t:7:vote'), { kind: 'ticket', reportId: 7, action: 'vote' });
+  assert.deepEqual(parseCustomId('mm:t:7:close'), { kind: 'ticket', reportId: 7, action: 'close' });
+  assert.deepEqual(parseCustomId('mm:t:7:decide'), { kind: 'ticket', reportId: 7, action: 'decide' });
+  for (const bad of ['mm:r:42:123', 'mm:t:0:vote', 'mm:t:7:delete', 'mm:m:42:reports']) assert.equal(parseCustomId(bad), null);
+});

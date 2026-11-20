@@ -26,26 +26,26 @@ export function planCalls(matches: Match[]): { targets: Map<string, string>; mem
   return { targets, members };
 }
 
-/** Só os jogadores (e a staff) veem e entram; o bot gerencia. */
-function privateOverwrites(guild: Guild, playerIds: string[], staffRoleId: string, allow: bigint[]): OverwriteResolvable[] {
+/** Só os jogadores (e os cargos dados, como a staff) veem e entram; o bot gerencia. */
+export function privateOverwrites(guild: Guild, playerIds: string[], roleIds: string[], allow: bigint[]): OverwriteResolvable[] {
   return [
     { id: guild.roles.everyone.id, deny: [P.ViewChannel] },
     { id: guild.client.user.id, type: OverwriteType.Member, allow: [P.ViewChannel, P.Connect, P.MoveMembers, P.ManageChannels, P.SendMessages, P.EmbedLinks, P.AttachFiles, P.ReadMessageHistory] },
-    { id: staffRoleId, type: OverwriteType.Role, allow },
+    ...roleIds.map(id => ({ id, type: OverwriteType.Role, allow })),
     ...playerIds.map(id => ({ id, type: OverwriteType.Member, allow })),
   ];
 }
 
-async function category(guild: Guild): Promise<CategoryChannel> {
-  const found = guild.channels.cache.find((c): c is CategoryChannel => c.type === ChannelType.GuildCategory && c.name.toLowerCase() === CATEGORY.toLowerCase());
-  return found ?? await guild.channels.create({ name: CATEGORY, type: ChannelType.GuildCategory });
+export async function category(guild: Guild, name = CATEGORY): Promise<CategoryChannel> {
+  const found = guild.channels.cache.find((c): c is CategoryChannel => c.type === ChannelType.GuildCategory && c.name.toLowerCase() === name.toLowerCase());
+  return found ?? await guild.channels.create({ name, type: ChannelType.GuildCategory });
 }
 
 /** Sala de texto privada da partida, na categoria Matches, visível só para os 12 jogadores e a staff. */
 export async function createRoom(guild: Guild, match: Match, staffRoleId: string): Promise<TextChannel> {
   return guild.channels.create({
     name: roomName(match.id), type: ChannelType.GuildText, parent: await category(guild),
-    permissionOverwrites: privateOverwrites(guild, match.players.map(p => p.discordId), staffRoleId, [P.ViewChannel, P.SendMessages, P.ReadMessageHistory]),
+    permissionOverwrites: privateOverwrites(guild, match.players.map(p => p.discordId), [staffRoleId], [P.ViewChannel, P.SendMessages, P.ReadMessageHistory]),
   });
 }
 
@@ -68,7 +68,7 @@ export async function syncCalls(guild: Guild, service: ServiceContract, staffRol
   const voiceAllow = [P.ViewChannel, P.Connect, P.Speak];
 
   for (const [name, ids] of members) {
-    const overwrites = privateOverwrites(guild, ids, staffRoleId, voiceAllow);
+    const overwrites = privateOverwrites(guild, ids, [staffRoleId], voiceAllow);
     const existing = calls.get(name);
     try {
       if (!existing) {

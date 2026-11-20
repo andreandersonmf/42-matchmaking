@@ -45,7 +45,8 @@ export function serviceStub(overrides: Partial<ServiceContract> = {}): ServiceCo
     joinQueue: unsupported, leaveQueue: unsupported, getQueue: async () => ({ players: [], spikers: 0, setters: 0, ready: false }),
     createMatch: unsupported, getMatch: async () => null, listMatches: async () => [], countMatches: async () => 0, getActiveMatches: async () => [], attachMessage: unsupported,
     voteMode: unsupported, setCaptain: unsupported, voteCaptain: unsupported, reportResult: unsupported, setReady: unsupported, leaveMatch: unsupported, substitute: unsupported, moveToRoom: unsupported, pick: unsupported, startMatch: unsupported, finishMatch: unsupported, voteMvp: unsupported,
-    cancelMatch: unsupported, grantVip: unsupported, adjustElo: unsupported, tick: async () => [], ...overrides,
+    cancelMatch: unsupported, grantVip: unsupported, adjustElo: unsupported, tick: async () => [],
+    openReport: unsupported, attachReport: unsupported, getReport: async () => null, voteReport: unsupported, closeReport: unsupported, decideReport: unsupported, ...overrides,
   };
 }
 

@@ -7,8 +7,9 @@ import { pathToFileURL } from 'node:url';
 import { calculateElo, rankFor, START_ELO } from './ranks.js';
 import type {
   LinkChallenge, Match, MatchFilter, MatchMode, MatchPlayer, Player, Position, RankedPlayer,
-  ServiceContract, Team, VipTier,
+  Report, ServiceContract, Team, Verdict, VipTier,
 } from './types.js';
+import { VERDICTS } from './types.js';
 
 export class DomainError extends Error {
   constructor(message: string) { super(message); this.name = 'DomainError'; }
@@ -32,6 +33,10 @@ const MODES: MatchMode[] = ['balanced', 'captains', 'random'];
 const SNAKE = [1, 2, 2, 1, 1, 2, 2, 1, 1, 2] as const;
 const PICK_SECONDS = 45_000;
 const ACTIVE = "('voting','captains','drafting','ready','live','mvp')";
+/** Denúncias: até 24h depois da partida, até 3 denunciantes por ticket, pelo menos 2 votos do Conselho. */
+const REPORT_WINDOW_MS = 24 * 60 * 60_000;
+const MAX_REPORTERS = 3;
+const MIN_BALLOTS = 2;
 
 /**
  * Monta os 12 da partida a partir da fila (em ordem de entrada): os mais antigos de cada posição entram
@@ -164,6 +169,15 @@ export class MatchmakingService implements ServiceContract {
         action TEXT NOT NULL,
         details TEXT NOT NULL,
         at INTEGER NOT NULL
+      )`,
+      // Tickets de denúncia: um por acusado em cada partida; denunciantes e votos ficam no JSON.
+      `CREATE TABLE IF NOT EXISTS reports (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        status TEXT NOT NULL,
+        match_id INTEGER NOT NULL REFERENCES matches(id),
+        accused_id TEXT NOT NULL,
+        data TEXT NOT NULL,
+        UNIQUE (match_id, accused_id)
       )`,
     ]) await this.client.execute(statement);
   }
@@ -350,6 +364,8 @@ export class MatchmakingService implements ServiceContract {
   async joinQueue(discordId: string, position?: Position) {
     return this.transaction(async () => {
       const player = await this.requiredPlayer(discordId);
+      assert(!player.queueBanUntil || player.queueBanUntil <= this.now(),
+        `Você está suspenso da fila pelo Conselho até <t:${Math.floor((player.queueBanUntil ?? 0) / 1000)}:f>.`);
       assert(!await this.hasActiveMatch(discordId), 'Você já participa de uma partida em andamento.');
       assert(!await this.row('SELECT discord_id FROM queue WHERE discord_id=?', discordId), 'Você já está na fila.');
       assert((await this.rows('SELECT discord_id FROM queue')).length < 12, 'A fila está cheia (12/12). Aguarde a próxima partida.');
@@ -878,5 +894,138 @@ export class MatchmakingService implements ServiceContract {
       }
       return changed;
     });
+  }
+
+  private async readReport(id: number): Promise<Report> {
+    const row = await this.row<JsonRow>('SELECT data FROM reports WHERE id=?', id);
+    assert(row, 'Denúncia não encontrada.');
+    return JSON.parse(row.data) as Report;
+  }
+
+  private async saveReport(report: Report) {
+    await this.run('UPDATE reports SET status=?,data=? WHERE id=?', report.status, JSON.stringify(report), report.id);
+  }
+
+  private assertOpenReport(report: Report) {
+    assert(report.status === 'open', report.status === 'tied'
+      ? 'A votação deste caso empatou. Agora um admin decide.' : 'Este caso já foi encerrado.');
+  }
+
+  async getReport(id: number): Promise<Report | null> {
+    const row = await this.row<JsonRow>('SELECT data FROM reports WHERE id=?', id);
+    return row ? JSON.parse(row.data) as Report : null;
+  }
+
+  /** Abre o ticket contra o acusado nesta partida ou junta o denunciante ao ticket que já existe. */
+  async openReport(matchId: number, reporterId: string, accusedId: string, reason: string): Promise<{ report: Report; created: boolean }> {
+    return this.transaction(async () => {
+      const match = await this.readStored(matchId);
+      const played = (id: string) => match.players.some(player => player.discordId === id);
+      assert(played(reporterId), 'Somente os 12 jogadores desta partida podem denunciar.');
+      assert(reporterId !== accusedId, 'Você não pode denunciar a si mesmo.');
+      assert(played(accusedId), 'O jogador denunciado precisa estar nesta partida.');
+      assert(match.status === 'live' || match.status === 'mvp'
+        || (match.status === 'completed' && match.finishedAt !== null && this.now() - match.finishedAt <= REPORT_WINDOW_MS),
+        'Denúncias só podem ser abertas durante a partida ou até 24 horas depois do fim. Partidas canceladas não aceitam denúncia.');
+      const text = reason.trim();
+      assert(text.length >= 10 && text.length <= 500, 'Escreva o motivo com 10 a 500 caracteres.');
+      const entry = { id: reporterId, reason: text, at: this.now() };
+      const row = await this.row<JsonRow>('SELECT data FROM reports WHERE match_id=? AND accused_id=?', matchId, accusedId);
+      if (row) {
+        const report = JSON.parse(row.data) as Report;
+        assert(report.status !== 'closed', 'Este jogador já foi julgado por esta partida.');
+        assert(!report.reporters.some(reporter => reporter.id === reporterId), 'Você já denunciou este jogador nesta partida. Mande as provas no canal do ticket.');
+        assert(report.reporters.length < MAX_REPORTERS, 'Este jogador já tem 3 denúncias nesta partida. O Conselho já está analisando o caso.');
+        report.reporters.push(entry);
+        await this.saveReport(report);
+        await this.audit(reporterId, 'report.joined', { reportId: report.id, matchId, accusedId });
+        return { report, created: false };
+      }
+      const inserted = await this.run('INSERT INTO reports(status,match_id,accused_id,data) VALUES(?,?,?,?)', 'open', matchId, accusedId, '{}');
+      const report: Report = {
+        id: Number(inserted.lastInsertRowid), status: 'open', matchId, accusedId, reporters: [entry], ballots: {},
+        verdict: null, decidedBy: null, closedBy: null, channelId: null, messageId: null, createdAt: this.now(), closedAt: null,
+      };
+      await this.saveReport(report);
+      await this.audit(reporterId, 'report.opened', { reportId: report.id, matchId, accusedId });
+      return { report, created: true };
+    });
+  }
+
+  async attachReport(id: number, channelId: string, messageId: string): Promise<void> {
+    await this.transaction(async () => {
+      const report = await this.readReport(id);
+      report.channelId = channelId;
+      report.messageId = messageId;
+      await this.saveReport(report);
+    });
+  }
+
+  /** Voto de um conselheiro; pode ser trocado enquanto o caso está aberto. Quem o bot deixa votar é decidido pelo cargo. */
+  async voteReport(id: number, voterId: string, verdict: Verdict): Promise<Report> {
+    return this.transaction(async () => {
+      const report = await this.readReport(id);
+      this.assertOpenReport(report);
+      assert(VERDICTS.includes(verdict), 'Voto inválido.');
+      assert(voterId !== report.accusedId && !report.reporters.some(reporter => reporter.id === voterId), 'Você é parte deste caso e não pode votar.');
+      report.ballots[voterId] = verdict;
+      await this.saveReport(report);
+      await this.audit(voterId, 'report.voted', { reportId: id, verdict });
+      return report;
+    });
+  }
+
+  /** Encerra pela maioria. Empate no topo deixa o caso para um admin decidir. */
+  async closeReport(id: number, actorId: string): Promise<Report> {
+    return this.transaction(async () => {
+      const report = await this.readReport(id);
+      this.assertOpenReport(report);
+      const ballots = Object.values(report.ballots);
+      assert(ballots.length >= MIN_BALLOTS, 'São necessários pelo menos 2 votos do Conselho para encerrar o caso.');
+      const counts = new Map<Verdict, number>();
+      for (const verdict of ballots) counts.set(verdict, (counts.get(verdict) ?? 0) + 1);
+      const top = Math.max(...counts.values());
+      const leaders = [...counts].filter(([, votes]) => votes === top).map(([verdict]) => verdict);
+      if (leaders.length > 1) {
+        report.status = 'tied';
+        await this.saveReport(report);
+        await this.audit(actorId, 'report.tied', { reportId: id, leaders });
+        return report;
+      }
+      await this.applyVerdict(report, leaders[0], actorId, 'council');
+      return report;
+    });
+  }
+
+  async decideReport(id: number, actorId: string, verdict: Verdict): Promise<Report> {
+    return this.transaction(async () => {
+      const report = await this.readReport(id);
+      assert(report.status === 'tied', report.status === 'open' ? 'Este caso ainda está em votação no Conselho.' : 'Este caso já foi encerrado.');
+      assert(VERDICTS.includes(verdict), 'Decisão inválida.');
+      await this.applyVerdict(report, verdict, actorId, 'admin');
+      return report;
+    });
+  }
+
+  private async applyVerdict(report: Report, verdict: Verdict, actorId: string, by: 'council' | 'admin') {
+    const player = await this.requiredPlayer(report.accusedId);
+    const details: Record<string, unknown> = { reportId: report.id, playerId: report.accusedId, verdict, by };
+    if (verdict === 'warning') {
+      player.warnings = (player.warnings ?? 0) + 1;
+    } else if (verdict.startsWith('elo:')) {
+      // Mesma conta do ajuste manual: nunca abaixo de 0. Vale em partida ativa porque o settle relê o jogador.
+      const delta = Math.max(0, player.elo - Number(verdict.slice(4))) - player.elo;
+      player.elo += delta;
+      await this.run('INSERT INTO elo_events(discord_id,match_id,at,elo,delta) VALUES(?,?,?,?,?)', player.discordId, report.matchId, this.now(), player.elo, delta);
+      details.delta = delta;
+    } else if (verdict.startsWith('susp:')) {
+      player.queueBanUntil = Math.max(this.now(), player.queueBanUntil ?? 0) + Number(verdict.slice(5)) * 86_400_000;
+      await this.run('DELETE FROM queue WHERE discord_id=?', player.discordId);
+      details.until = player.queueBanUntil;
+    }
+    if (verdict !== 'innocent') await this.savePlayer(player);
+    Object.assign(report, { status: 'closed', verdict, decidedBy: by, closedBy: actorId, closedAt: this.now() });
+    await this.saveReport(report);
+    await this.audit(actorId, by === 'admin' ? 'report.decided' : 'report.closed', details);
   }
 }

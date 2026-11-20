@@ -27,6 +27,10 @@ export interface Player {
   vip: VipTier;
   vipExpiresAt: number | null;
   joinedAt: number;
+  /** Advertências aplicadas pelo Conselho. */
+  warnings?: number;
+  /** Suspenso da fila até este instante (ms). */
+  queueBanUntil?: number | null;
 }
 
 export interface RankedPlayer extends Player {
@@ -135,6 +139,27 @@ export interface MatchFilter {
   playerId?: string;
 }
 
+export const VERDICTS = ['innocent', 'warning', 'elo:25', 'elo:50', 'elo:100', 'susp:1', 'susp:3', 'susp:7'] as const;
+export type Verdict = typeof VERDICTS[number];
+export type ReportStatus = 'open' | 'tied' | 'closed';
+
+export interface Report {
+  id: number;
+  status: ReportStatus;
+  matchId: number;
+  accusedId: string;
+  reporters: { id: string; reason: string; at: number }[];
+  /** Conselheiro -> veredito. Fica secreto no painel até o caso fechar. */
+  ballots: Record<string, Verdict>;
+  verdict: Verdict | null;
+  decidedBy: 'council' | 'admin' | null;
+  closedBy: string | null;
+  channelId: string | null;
+  messageId: string | null;
+  createdAt: number;
+  closedAt: number | null;
+}
+
 export interface ServiceContract {
   getPlayer(discordId: string): Promise<Player | null>;
   getRankedPlayer(discordId: string): Promise<RankedPlayer | null>;
@@ -169,4 +194,10 @@ export interface ServiceContract {
   grantVip(actorId: string, playerId: string, tier: VipTier, days: number): Promise<Player>;
   adjustElo(actorId: string, playerId: string, amount: number, reason: string): Promise<Player>;
   tick(): Promise<Match[]>;
+  openReport(matchId: number, reporterId: string, accusedId: string, reason: string): Promise<{ report: Report; created: boolean }>;
+  attachReport(id: number, channelId: string, messageId: string): Promise<void>;
+  getReport(id: number): Promise<Report | null>;
+  voteReport(id: number, voterId: string, verdict: Verdict): Promise<Report>;
+  closeReport(id: number, actorId: string): Promise<Report>;
+  decideReport(id: number, actorId: string, verdict: Verdict): Promise<Report>;
 }

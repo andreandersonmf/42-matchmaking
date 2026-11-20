@@ -11,6 +11,7 @@ import { syncAllEloRoles, syncEloRoles } from './roles.js';
 import { publishVerifyGuide, verificationApplier } from './verify.js';
 import { callSyncer, QUEUE_CALL, syncCalls } from './voice.js';
 import { errorDetail } from './access.js';
+import { ensureCouncilRole } from './reports.js';
 
 export async function startBot(): Promise<(() => void) | undefined> {
   if (process.env.NODE_ENV === 'test' || process.env.NODE_TEST_CONTEXT) return undefined;
@@ -95,6 +96,9 @@ export async function startBot(): Promise<(() => void) | undefined> {
       void publishVerifyGuide(client, config.verifyChannelId, config.guildId)
         .catch(() => console.warn('Não foi possível publicar o guia de verificação no canal #verify.'));
     }
+    client.guilds.fetch(config.guildId)
+      .then(guild => ensureCouncilRole(guild))
+      .catch(error => console.warn(`Não foi possível criar o cargo Membro do Conselho.${errorDetail(error)}`));
     client.guilds.fetch(config.guildId)
       .then(guild => syncAllEloRoles(service, guild, console.warn))
       .catch(error => console.warn(`Não foi possível sincronizar os cargos de Elo na inicialização.${errorDetail(error)}`));

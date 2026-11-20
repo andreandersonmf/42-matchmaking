@@ -1,17 +1,18 @@
-import { ActionRowBuilder, AttachmentBuilder, ChannelType, StringSelectMenuBuilder, MessageFlags, type Guild, type ChatInputCommandInteraction, type Client, type Interaction, type ButtonInteraction, type StringSelectMenuInteraction } from 'discord.js';
+import { ActionRowBuilder, AttachmentBuilder, ChannelType, StringSelectMenuBuilder, MessageFlags, type Guild, type ChatInputCommandInteraction, type Client, type Interaction, type ButtonInteraction, type StringSelectMenuInteraction, type ModalSubmitInteraction } from 'discord.js';
 import { DomainError } from '../core/engine.js';
 import type { Match, Position, ServiceContract, Team, VipTier } from '../core/types.js';
 import type { BotEnvironment } from './env.js';
 import { BotError, errorDetail, parseCustomId, requireOwner, requireParticipant, requireStaff, safeError, selectedPlayer, type Actor } from './access.js';
 import { baseEmbed, draftCandidates, NO_MENTIONS, plain, replaceable, queuePresentation, relativeTime, rolePrompt, text, vipNames } from './presentation.js';
 import { createRoom } from './voice.js';
+import { createReportHandler } from './reports.js';
 import { renderProfile } from './profile.js';
 import { renderRanking } from './ranking.js';
 import { getDescription, lookupUsername } from './roblox.js';
 import type { MessageTransport, Publisher } from './publisher.js';
 import type { VerificationApplier } from './verify.js';
 
-type SupportedInteraction = ChatInputCommandInteraction | ButtonInteraction | StringSelectMenuInteraction;
+type SupportedInteraction = ChatInputCommandInteraction | ButtonInteraction | StringSelectMenuInteraction | ModalSubmitInteraction;
 
 const commandErrors: Record<string, string> = {
   register: 'Não foi possível iniciar o vínculo. Confira o nome Roblox e consulte /profile: a conta pode já estar vinculada. Se precisar trocar de conta, procure a staff.',
@@ -41,7 +42,7 @@ export interface HandlerDependencies {
   config: BotEnvironment;
   publisher: Publisher;
   transport: MessageTransport;
-  resolveActor(interaction: SupportedInteraction): Promise<Actor>;
+  resolveActor(interaction: ButtonInteraction | StringSelectMenuInteraction | ChatInputCommandInteraction): Promise<Actor>;
   lookup?: typeof lookupUsername;
   description?: typeof getDescription;
   profile?: typeof renderProfile;
@@ -82,6 +83,7 @@ export function createInteractionHandler(deps: HandlerDependencies): (interactio
     if (!await service.getPlayer(id)) throw new BotError('Você ainda não possui uma conta verificada. Use /register roblox:seu_usuario posicao:spiker, coloque o código na descrição Roblox e execute /verificar.');
   };
 
+  const reports = createReportHandler({ service, config, resolveActor: deps.resolveActor, syncRoles: deps.syncRoles, report });
   let queueOwner: string | undefined;
   /** Cria a partida com a fila atual, abre a sala privada e devolve o texto de confirmação. */
   const formMatch = async (guild: Guild | null, initiatorId: string, fallbackChannelId: string): Promise<string> => {
@@ -252,6 +254,10 @@ export function createInteractionHandler(deps: HandlerDependencies): (interactio
       else await info(interaction, action.action === 'leave' ? 'VOCÊ SAIU DA FILA' : 'VOCÊ ESTÁ NA FILA', `**${queue.players.length}/12** na fila. Com 12 jogadores a partida começa sozinha.`);
       return;
     }
+    if (action.kind === 'report' || action.kind === 'reportpick' || action.kind === 'reportform' || action.kind === 'ticket') {
+      await reports.component(interaction, action);
+      return;
+    }
     let actor: Actor | undefined;
     if (action.kind === 'start') actor = await deps.resolveActor(interaction);
     const match = await matchById(service, action.matchId);
@@ -341,15 +347,21 @@ export function createInteractionHandler(deps: HandlerDependencies): (interactio
   }
 
   return async interaction => {
-    if (!interaction.isChatInputCommand() && !interaction.isButton() && !interaction.isStringSelectMenu()) return;
+    if (!interaction.isChatInputCommand() && !interaction.isButton() && !interaction.isStringSelectMenu() && !interaction.isModalSubmit()) return;
     try {
       if (!interaction.inGuild() || interaction.guildId !== config.guildId) {
         await interaction.reply({ content: 'Este bot funciona somente no servidor configurado. Não é possível usar comandos por DM ou em outro servidor.', flags: MessageFlags.Ephemeral, allowedMentions: NO_MENTIONS });
         return;
       }
+      const action = interaction.isChatInputCommand() ? null : parseCustomId(interaction.customId);
+      // O formulário da denúncia precisa ser a primeira resposta da interação: sem deferReply antes.
+      if (action?.kind === 'reportpick' && interaction.isStringSelectMenu()) { await reports.pick(interaction, action.matchId); return; }
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       if (interaction.isChatInputCommand()) await command(interaction);
-      else await component(interaction);
+      else if (interaction.isModalSubmit()) {
+        if (action?.kind !== 'reportform') throw new BotError('Formulário inválido ou desatualizado.');
+        await reports.form(interaction, action.matchId, action.accusedId);
+      } else await component(interaction);
     } catch (error) {
       if (!(error instanceof BotError || error instanceof DomainError)) report(`Erro inesperado em uma interação.${errorDetail(error)}`);
       const fallback = interaction.isChatInputCommand() ? commandErrors[interaction.commandName] : undefined;

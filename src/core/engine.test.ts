@@ -438,3 +438,115 @@ test('2x do autofill só para quem é novo ou fraco na role; derrota sempre pela
   assert.equal(autofillGain(16, { elo: 1000, games: 40 }, 1000), 16);
   assert.equal(autofillGain(-16, { elo: 1000, games: 40 }, 1000), -8);
 });
+
+test('denúncia: até 3 jogadores da partida entram no mesmo ticket, sem repetição', async () => {
+  const { service } = await fixture();
+  try {
+    const match = await ready(service);
+    const [accused, a, b, c, d] = match.players.map(player => player.discordId);
+    const reason = 'Saiu da quadra e ficou parado o set inteiro.';
+    await assert.rejects(service.openReport(match.id, a, accused, reason), /durante a partida/);
+    await service.startMatch(match.id, 'staff');
+    await assert.rejects(service.openReport(match.id, 'outsider', accused, reason), /Somente os 12/);
+    await assert.rejects(service.openReport(match.id, a, 'outsider', reason), /precisa estar nesta partida/);
+    await assert.rejects(service.openReport(match.id, a, a, reason), /a si mesmo/);
+    await assert.rejects(service.openReport(match.id, a, accused, 'curto'), /10 a 500/);
+    const first = await service.openReport(match.id, a, accused, reason);
+    assert.equal(first.created, true);
+    await assert.rejects(service.openReport(match.id, a, accused, reason), /já denunciou/);
+    const second = await service.openReport(match.id, b, accused, reason);
+    assert.equal(second.created, false);
+    assert.equal(second.report.id, first.report.id);
+    await service.openReport(match.id, c, accused, reason);
+    await assert.rejects(service.openReport(match.id, d, accused, reason), /já tem 3 denúncias/);
+    assert.deepEqual((await service.getReport(first.report.id))!.reporters.map(r => r.id), [a, b, c]);
+  } finally { service.close(); }
+});
+
+test('denúncia: prazo de 24h após a partida; partida cancelada não aceita', async () => {
+  const { service, advance } = await fixture();
+  try {
+    let match = await ready(service);
+    await service.startMatch(match.id, 'staff');
+    await service.finishMatch(match.id, 'staff', 'A');
+    advance(60_000);
+    await service.tick();
+    match = (await service.getMatch(match.id))!;
+    assert.equal(match.status, 'completed');
+    const [accused, a, b] = match.players.map(player => player.discordId);
+    advance(24 * 60 * 60_000 - 60_000);
+    await service.openReport(match.id, a, accused, 'Xingou o time inteiro no chat.');
+    advance(60_001);
+    await assert.rejects(service.openReport(match.id, b, accused, 'Xingou o time inteiro no chat.'), /24 horas/);
+  } finally { service.close(); }
+  const other = await fixture();
+  try {
+    const match = await queued(other.service);
+    await other.service.cancelMatch(match.id, 'staff');
+    await assert.rejects(other.service.openReport(match.id, match.players[1].discordId, match.players[0].discordId, 'Motivo bem descrito.'), /canceladas/);
+  } finally { other.service.close(); }
+});
+
+test('denúncia: partes não votam, 2 votos encerram, maioria suspende da fila', async () => {
+  const { service, advance } = await fixture(13);
+  try {
+    const match = await ready(service);
+    await service.startMatch(match.id, 'staff');
+    const [accused, reporter] = match.players.map(player => player.discordId);
+    const { report } = await service.openReport(match.id, reporter, accused, 'Entregou o jogo de propósito.');
+    await assert.rejects(service.voteReport(report.id, accused, 'innocent'), /parte deste caso/);
+    await assert.rejects(service.voteReport(report.id, reporter, 'susp:3'), /parte deste caso/);
+    await assert.rejects(service.voteReport(report.id, 'c1', 'ban' as never), /inválido/);
+    await service.voteReport(report.id, 'c1', 'innocent');
+    await assert.rejects(service.closeReport(report.id, 'c1'), /pelo menos 2 votos/);
+    await service.voteReport(report.id, 'c1', 'susp:3');
+    await service.voteReport(report.id, 'c2', 'susp:3');
+    await service.voteReport(report.id, 'c3', 'warning');
+    // Suspensão tira da fila: o 13º jogador está na fila e é testado abaixo pelo próprio acusado.
+    await service.finishMatch(match.id, 'staff', 'A');
+    advance(60_000);
+    await service.tick();
+    await service.joinQueue(accused);
+    const closed = await service.closeReport(report.id, 'c1');
+    assert.equal(closed.status, 'closed');
+    assert.equal(closed.verdict, 'susp:3');
+    assert.equal(closed.decidedBy, 'council');
+    assert.equal((await service.getQueue()).players.some(p => p.discordId === accused), false);
+    await assert.rejects(service.joinQueue(accused), /suspenso da fila/);
+    advance(3 * 86_400_000);
+    await service.joinQueue(accused);
+    await assert.rejects(service.closeReport(report.id, 'c1'), /já foi encerrado/);
+    await assert.rejects(service.voteReport(report.id, 'c4', 'warning'), /já foi encerrado/);
+  } finally { service.close(); }
+});
+
+test('denúncia: perda de Elo não passa de zero; empate vai para o admin', async () => {
+  const { service } = await fixture();
+  try {
+    const accused = '1';
+    const start = (await service.getPlayer(accused))!.elo;
+    if (start !== 60) await service.adjustElo('owner', accused, 60 - start, 'Elo conhecido para o teste');
+    const match = await ready(service);
+    await service.startMatch(match.id, 'staff');
+    const [reporter, other] = match.players.map(player => player.discordId).filter(id => id !== accused);
+    const before = (await service.getPlayer(accused))!.elo;
+    const elo = (await service.openReport(match.id, reporter, accused, 'Ofendeu o capitão adversário.')).report;
+    await service.voteReport(elo.id, 'c1', 'elo:100');
+    await service.voteReport(elo.id, 'c2', 'elo:100');
+    await service.closeReport(elo.id, 'c2');
+    assert.equal((await service.getPlayer(accused))!.elo, 0);
+    assert.equal((await service.getProfile(accused))!.eloHistory.at(-1)!.delta, -before);
+
+    const tie = (await service.openReport(match.id, reporter, other, 'Ficou ausente metade da partida.')).report;
+    await assert.rejects(service.decideReport(tie.id, 'admin', 'warning'), /em votação/);
+    await service.voteReport(tie.id, 'c1', 'warning');
+    await service.voteReport(tie.id, 'c2', 'innocent');
+    const tied = await service.closeReport(tie.id, 'c1');
+    assert.equal(tied.status, 'tied');
+    await assert.rejects(service.voteReport(tie.id, 'c3', 'warning'), /empatou/);
+    const decided = await service.decideReport(tie.id, 'admin', 'warning');
+    assert.equal(decided.decidedBy, 'admin');
+    assert.equal((await service.getPlayer(other))!.warnings, 1);
+    await assert.rejects(service.decideReport(tie.id, 'admin', 'innocent'), /já foi encerrado/);
+  } finally { service.close(); }
+});

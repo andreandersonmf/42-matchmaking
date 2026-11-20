@@ -33,7 +33,7 @@ test('votação traz contagens, prazo relativo e desempate; MVP usa um select de
   assert.match(voting.embeds[0].data.description!, /equilibrado, capitães, aleatório/);
   assert.equal(voting.components[0].components.length, 3);
   const mvp = matchPresentation(match({ status: 'mvp', winner: 'A', mvpDeadline: 1_800_000_060_000 }));
-  assert.equal(mvp.components.length, 1);
+  assert.equal(mvp.components.length, 2);
   const select = mvp.components[0].toJSON().components[0];
   assert.ok('options' in select && select.options.length === 12);
   assert.ok('max_values' in select && select.max_values === 1);
@@ -47,7 +47,7 @@ test('modo somente leitura desabilita controles; equipes prontas têm botão res
   const ready = matchPresentation(match({ status: 'ready' }));
   const button = ready.components[0].toJSON().components[0];
   assert.ok('label' in button && button.label?.includes('capitães'));
-  assert.equal(matchPresentation(match({ status: 'completed' })).components.length, 0);
+  assert.equal(matchPresentation(match({ status: 'completed' })).components.length, 1);
   assert.equal(matchPresentation(match({ status: 'cancelled' })).components.length, 0);
   assert.match(matchPresentation(match({ status: 'live' })).embeds[0].data.description!, /\/finalizar/);
 });
@@ -119,4 +119,28 @@ test('presença: Pronto/Sair no painel e só quem saiu ou expirou aparece para t
   const ids = matchPresentation(value).components.flatMap(row => row.toJSON().components.map(c => 'custom_id' in c ? c.custom_id : ''));
   assert.ok(ids.includes('mm:m:42:ready') && ids.includes('mm:m:42:leave') && ids.includes('mm:m:42:sub'));
   assert.deepEqual(parseCustomId(`mm:m:42:subin:${playerId(3)}`), { kind: 'subin', matchId: 42, outId: playerId(3) });
+});
+
+test('denúncia: botão no ao vivo, MVP e resultado; ticket esconde votos até fechar', async () => {
+  const { reportPresentation } = await import('./presentation.js');
+  const ids = (status: MatchStatus, interactive = true) => matchPresentation(match({ status }), undefined, interactive).components
+    .flatMap(row => row.toJSON().components as { custom_id?: string; disabled?: boolean }[]);
+  assert.ok(ids('live').some(c => c.custom_id === 'mm:m:42:report' && !c.disabled));
+  assert.ok(ids('mvp').some(c => c.custom_id === 'mm:m:42:report'));
+  assert.ok(ids('completed', false).some(c => c.custom_id === 'mm:m:42:report' && !c.disabled));
+  assert.ok(!ids('cancelled').some(c => c.custom_id === 'mm:m:42:report'));
+  const report = {
+    id: 1, status: 'open' as const, matchId: 42, accusedId: playerId(0), reporters: [{ id: playerId(1), reason: 'Ficou parado.', at: 0 }],
+    ballots: { [playerId(9)]: 'warning' as const }, verdict: null, decidedBy: null, closedBy: null, channelId: null, messageId: null, createdAt: 0, closedAt: null,
+  };
+  const open = reportPresentation(report, 'Roblox_0');
+  const openText = JSON.stringify(open.embeds[0].toJSON());
+  assert.doesNotMatch(openText, /Advertência/);
+  const closeButton = open.components[1].toJSON().components[0] as { disabled?: boolean };
+  assert.equal(closeButton.disabled, true);
+  const closed = reportPresentation({ ...report, status: 'closed', verdict: 'warning', decidedBy: 'council' }, 'Roblox_0');
+  assert.match(JSON.stringify(closed.embeds[0].toJSON()), /Advertência/);
+  assert.equal(closed.components.length, 0);
+  const tied = reportPresentation({ ...report, status: 'tied' }, 'Roblox_0');
+  assert.equal((tied.components[0].toJSON().components[0] as { custom_id: string }).custom_id, 'mm:t:1:decide');
 });
