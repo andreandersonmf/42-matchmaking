@@ -14,7 +14,7 @@ async function fixture(count = 12, random?: (max: number) => number) {
     const id = String(index + 1);
     const link = await service.beginLink(id, `Player ${id}`, String(1000 + index), `roblox${id}`, index % 3 === 2 ? 'setter' : 'spiker');
     await service.completeLink(id, link.code);
-    await service.adjustElo('owner', id, -500, 'Valor inicial do teste');
+    await service.adjustElo('owner', id, 300, 'Valor inicial do teste');
   }
   return { service, advance: (milliseconds: number) => { time += milliseconds; } };
 }
@@ -59,7 +59,7 @@ test('vinculação comprova descrição, impede duplicatas e expira em 15 minuto
     const link = await service.beginLink('1', 'Player', '123', 'Roblox', 'setter');
     await assert.rejects(service.completeLink('1', 'incorreto'), /Código não encontrado/);
     const player = await service.completeLink('1', `Descrição ${link.code}`);
-    assert.equal(player.elo, 1000);
+    assert.equal(player.elo, 200);
     assert.equal(player.position, 'setter');
     await assert.rejects(service.beginLink('2', 'Other', '123', 'Roblox', 'setter'), /já está vinculada/);
     const second = await service.beginLink('2', 'Other', '456', 'Other', 'spiker');

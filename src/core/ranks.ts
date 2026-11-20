@@ -25,7 +25,7 @@ export function rankFor(elo: number) {
 }
 
 /** Elo inicial de todo jogador novo (e de todos no reset de temporada). */
-export const START_ELO = 1000;
+export const START_ELO = 200;
 
 /**
  * Elo simétrico: num jogo equilibrado a vitória dá ~+16 e a derrota tira ~-16, então ninguém sobe só por jogar.
