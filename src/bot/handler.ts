@@ -99,7 +99,7 @@ export function createInteractionHandler(deps: HandlerDependencies): (interactio
     }
     const note = await updateMatch(match.id);
     await updateQueue();
-    return `**Partida #${match.id}** formada com times balanceados por Elo.${room} Cada time vota no seu capitão; um capitão manda o link e inicia o jogo.${note}`;
+    return `**Partida #${match.id}** formada.${room} Os jogadores votam nos 2 capitães, os capitães escolhem os times e um deles manda o link e inicia o jogo.${note}`;
   };
 
   async function command(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -142,6 +142,10 @@ export function createInteractionHandler(deps: HandlerDependencies): (interactio
       case 'sair': {
         await assertRegistered(user.id);
         const queue = name === 'fila' ? await service.joinQueue(user.id) : await service.leaveQueue(user.id);
+        if (queue.ready && name === 'fila' && interaction.channelId) {
+          await info(interaction, 'FILA COMPLETA', await formMatch(interaction.guild, queueOwner ?? config.ownerId, interaction.channelId));
+          return;
+        }
         await updateQueue();
         await interaction.editReply(queuePresentation(queue, config.siteUrl));
         return;

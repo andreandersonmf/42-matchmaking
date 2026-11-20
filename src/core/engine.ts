@@ -444,8 +444,8 @@ export class MatchmakingService implements ServiceContract {
         })),
       };
       for (const player of selected) await this.run('DELETE FROM queue WHERE discord_id=?', player.discordId);
-      // Sem votação de modo e sem draft: os times saem balanceados por Elo e os jogadores só votam nos capitães.
-      this.resolveMode(match, 'balanced');
+      // Sem votação de modo: os jogadores votam nos 2 capitães e eles montam os times no draft.
+      this.resolveMode(match, 'captains');
       await this.saveMatch(match);
       await this.audit(initiatorId, 'match.created', { matchId: match.id });
       return this.publicMatch(match);

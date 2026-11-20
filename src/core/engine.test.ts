@@ -26,8 +26,19 @@ async function queued(service: MatchmakingService) {
 
 async function ready(service: MatchmakingService) {
   let match = await queued(service);
-  // Times já saem balanceados por Elo; cada um vota em si e o desempate escolhe um capitão por time.
+  // Cada um vota em si; o desempate escolhe os 2 capitães, que montam os times no draft.
   for (const player of match.players) match = await service.voteCaptain(match.id, player.discordId, player.discordId);
+  return draft(service, match);
+}
+
+/** Capitães escolhem até fechar os times, sempre o primeiro jogador que cabe. */
+async function draft(service: MatchmakingService, match: Match) {
+  while (match.status === 'drafting') {
+    const captain = match.players.find(p => p.isCaptain && p.team === match.draftTurn)!;
+    for (const candidate of match.players.filter(p => p.team === null)) {
+      try { match = await service.pick(match.id, captain.discordId, candidate.discordId); break; } catch { /* não cabe na composição */ }
+    }
+  }
   return match;
 }
 
@@ -126,6 +137,7 @@ test('histórico filtra participante antes de paginar e conta todas as partidas'
   try {
     let first = await queued(service);
     for (const player of first.players) first = await service.voteCaptain(first.id, player.discordId, player.discordId);
+    first = await draft(service, first);
     await service.startMatch(first.id, 'staff');
     await service.finishMatch(first.id, 'staff', 'A');
     advance(60_000);
@@ -133,6 +145,7 @@ test('histórico filtra participante antes de paginar e conta todas as partidas'
     for (const player of (await service.listPlayers()).filter(p => !first.players.some(f => f.discordId === p.discordId))) await service.joinQueue(player.discordId);
     let second = await service.createMatch('staff', 'channel');
     for (const player of second.players) second = await service.voteCaptain(second.id, player.discordId, player.discordId);
+    second = await draft(service, second);
     await service.startMatch(second.id, 'staff');
     await service.finishMatch(second.id, 'staff', 'B');
     advance(60_000);
@@ -177,17 +190,20 @@ test('equilíbrio respeita funções e encontra diferença mínima possível', a
   } finally { service.close(); }
 });
 
-test('modo balanceado: voto de capitão só vale para o próprio time e capitão pode iniciar', async () => {
-  const { service } = await fixture();
+test('jogadores votam e os 2 mais votados viram capitães e fazem o draft', async () => {
+  const { service, advance } = await fixture();
   try {
-    let match = await queued(service);
-    const a = match.players.filter(player => player.team === 'A');
-    const b = match.players.filter(player => player.team === 'B');
-    await assert.rejects(service.voteCaptain(match.id, a[0].discordId, b[0].discordId), /seu time/);
-    for (const player of match.players) match = await service.voteCaptain(match.id, player.discordId, player.team === 'A' ? a[1].discordId : b[2].discordId);
-    assert.equal(match.status, 'ready');
-    assert.deepEqual(match.players.filter(player => player.isCaptain).map(player => player.discordId).sort(), [a[1].discordId, b[2].discordId].sort());
-    assert.equal((await service.startMatch(match.id, b[2].discordId)).status, 'live');
+    const match = await queued(service);
+    assert.equal(match.status, 'captains');
+    assert.equal(match.players.filter(p => p.team !== null).length, 0);
+    await service.voteCaptain(match.id, '1', '5');
+    await service.voteCaptain(match.id, '2', '5');
+    await service.voteCaptain(match.id, '3', '9');
+    advance(30_000);
+    const [resolved] = await service.tick();
+    assert.equal(resolved.status, 'drafting');
+    assert.deepEqual(resolved.players.filter(p => p.isCaptain).map(p => p.discordId).sort(), ['5', '9']);
+    checkTeams(await draft(service, resolved));
   } finally { service.close(); }
 });
 
@@ -320,7 +336,8 @@ test('reinício recupera prazos e não duplica Elo já distribuído', async () =
     service.close();
     time += 30_000;
     service = new MatchmakingService(database, { now: () => time, ownerId: 'owner' });
-    assert.equal((await service.tick())[0].status, 'ready');
+    assert.equal((await service.tick())[0].status, 'drafting');
+    await draft(service, (await service.getMatch(match.id))!);
     assert.equal((await service.getMatch(match.id))!.messageId, 'message');
     await service.startMatch(match.id, 'staff');
     await service.finishMatch(match.id, 'staff', 'A');
