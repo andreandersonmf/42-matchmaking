@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { autofillDelta, MatchmakingService, pickPlayers } from './engine.js';
+import { autofillDelta, autofillGain, MatchmakingService, pickPlayers } from './engine.js';
 import { calculateElo, rankFor, RANKS } from './ranks.js';
 import type { Match, Position } from './types.js';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -14,7 +14,7 @@ async function fixture(count = 12, random?: (max: number) => number) {
     const id = String(index + 1);
     const link = await service.beginLink(id, `Player ${id}`, String(1000 + index), `roblox${id}`, index % 3 === 2 ? 'setter' : 'spiker');
     await service.completeLink(id, link.code);
-    await service.adjustElo('owner', id, 500, 'Valor inicial do teste');
+    await service.adjustElo('owner', id, -500, 'Valor inicial do teste');
   }
   return { service, advance: (milliseconds: number) => { time += milliseconds; } };
 }
@@ -59,7 +59,7 @@ test('vinculação comprova descrição, impede duplicatas e expira em 15 minuto
     const link = await service.beginLink('1', 'Player', '123', 'Roblox', 'setter');
     await assert.rejects(service.completeLink('1', 'incorreto'), /Código não encontrado/);
     const player = await service.completeLink('1', `Descrição ${link.code}`);
-    assert.equal(player.elo, 0);
+    assert.equal(player.elo, 1000);
     assert.equal(player.position, 'setter');
     await assert.rejects(service.beginLink('2', 'Other', '123', 'Roblox', 'setter'), /já está vinculada/);
     const second = await service.beginLink('2', 'Other', '456', 'Other', 'spiker');
@@ -216,7 +216,7 @@ test('MVP pode ser perdedor, sem autovoto, Elo aplica uma única vez após 60s',
     const completed = (await service.tick())[0];
     assert.equal(completed.mvpId, loser.discordId);
     assert.equal(completed.status, 'completed');
-    assert.equal((await service.getPlayer(loser.discordId))!.elo, 486);
+    assert.equal((await service.getPlayer(loser.discordId))!.elo, 472);
     assert.equal((await service.getPlayer(loser.discordId))!.mvps, 1);
     assert.equal((await service.getPlayer(voter.discordId))!.elo, 532);
     assert.deepEqual(await service.tick(), []);
@@ -263,10 +263,11 @@ test('VIP tem validade, renovação cumulativa e bônus não altera derrotas', a
     advance(2 * 86_400_000);
     assert.equal((await service.getPlayer('1'))!.vip, 'none');
     const input = { elo: 500, teamAverage: 500, opponentAverage: 500, mvp: false };
-    assert.equal(calculateElo({ ...input, won: true, vip: 'none' }).delta, 32);
-    assert.equal(calculateElo({ ...input, won: true, vip: 'vip' }).delta, 35);
-    assert.equal(calculateElo({ ...input, won: true, vip: 'vip_plus' }).delta, 37);
-    assert.equal(calculateElo({ ...input, won: false, vip: 'vip_plus' }).delta, -18);
+    assert.equal(calculateElo({ ...input, won: true, vip: 'none' }).delta, 16);
+    assert.equal(calculateElo({ ...input, won: true, vip: 'vip' }).delta, 18);
+    assert.equal(calculateElo({ ...input, won: true, vip: 'vip_plus' }).delta, 18);
+    assert.equal(calculateElo({ ...input, won: false, vip: 'vip_plus' }).delta, -16);
+    assert.equal(calculateElo({ ...input, won: true, vip: 'none', calibrating: true }).delta, 32);
   } finally { service.close(); }
 });
 
@@ -287,7 +288,7 @@ test('Elo recompensa surpresa, protege Bronze e nunca fica negativo', () => {
   const input = { elo: 500, teamAverage: 500, opponentAverage: 500, mvp: false, vip: 'none' as const };
   assert.ok(calculateElo({ ...input, opponentAverage: 1000, won: true }).delta > calculateElo({ ...input, won: true }).delta);
   assert.ok(calculateElo({ ...input, opponentAverage: 1000, won: false }).delta > calculateElo({ ...input, won: false }).delta);
-  assert.equal(calculateElo({ ...input, elo: 100, won: false }).delta, -10);
+  assert.equal(calculateElo({ ...input, elo: 100, won: false }).delta, -8);
   assert.equal(calculateElo({ ...input, elo: 3, won: false }).delta, -3);
   assert.equal(calculateElo({ ...input, elo: 0, won: false }).delta, 0);
   for (const elo of [0, 3, 7, 10, 100, 500]) {
@@ -429,4 +430,11 @@ test('quem sai ou não confirma em 2 min é trocado por alguém da fila na mesma
     assert.ok(!match.players.some(p => p.discordId === afk.discordId));
     assert.equal((await service.getQueue()).players.length, 0);
   } finally { service.close(); }
+});
+
+test('2x do autofill só para quem é novo ou fraco na role; derrota sempre pela metade', () => {
+  assert.equal(autofillGain(16, { elo: 1000, games: 3 }, 1000), 32);
+  assert.equal(autofillGain(16, { elo: 850, games: 40 }, 1000), 32);
+  assert.equal(autofillGain(16, { elo: 1000, games: 40 }, 1000), 16);
+  assert.equal(autofillGain(-16, { elo: 1000, games: 40 }, 1000), -8);
 });

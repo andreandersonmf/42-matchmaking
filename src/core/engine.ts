@@ -4,7 +4,7 @@ import { createHash, randomBytes, randomInt } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { calculateElo, rankFor } from './ranks.js';
+import { calculateElo, rankFor, START_ELO } from './ranks.js';
 import type {
   LinkChallenge, Match, MatchFilter, MatchMode, MatchPlayer, Player, Position, RankedPlayer,
   ServiceContract, Team, VipTier,
@@ -54,6 +54,10 @@ export function pickPlayers<T extends { position: Position }>(queue: T[]): (T & 
 
 /** Autofill ganha o dobro na vitória e perde só metade na derrota. */
 export const autofillDelta = (delta: number): number => delta > 0 ? delta * 2 : Math.trunc(delta / 2) || 0;
+
+/** Autofill: derrota sempre pela metade; vitória em dobro só para quem é novo (< 10 jogos) ou fraco (100+ abaixo do geral) na role. */
+export const autofillGain = (delta: number, role: { elo: number; games: number }, elo: number): number =>
+  delta > 0 && role.games >= 10 && role.elo > elo - 100 ? delta : autofillDelta(delta);
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new DomainError(message);
@@ -123,6 +127,10 @@ export class MatchmakingService implements ServiceContract {
         data TEXT NOT NULL
       )`,
       `CREATE TABLE IF NOT EXISTS links (discord_id TEXT PRIMARY KEY, data TEXT NOT NULL)`,
+      `CREATE TABLE IF NOT EXISTS role_elo (
+        discord_id TEXT NOT NULL, role TEXT NOT NULL, elo INTEGER NOT NULL, games INTEGER NOT NULL,
+        PRIMARY KEY (discord_id, role)
+      )`,
       `CREATE TABLE IF NOT EXISTS queue (
         discord_id TEXT PRIMARY KEY REFERENCES players(discord_id),
         queued_at INTEGER NOT NULL
@@ -314,8 +322,8 @@ export class MatchmakingService implements ServiceContract {
       assert(!await this.row('SELECT discord_id FROM players WHERE roblox_id=?', link.robloxId), 'Esta conta Roblox já está vinculada a outro jogador.');
       const player: Player = {
         discordId, name: link.name, robloxId: link.robloxId, robloxName: link.robloxName,
-        position: link.position, elo: 0, wins: 0, losses: 0, matches: 0, mvps: 0,
-        streak: 0, bestElo: 0, vip: 'none', vipExpiresAt: null, joinedAt: this.now(),
+        position: link.position, elo: START_ELO, wins: 0, losses: 0, matches: 0, mvps: 0,
+        streak: 0, bestElo: START_ELO, vip: 'none', vipExpiresAt: null, joinedAt: this.now(),
       };
       await this.run('INSERT INTO players(discord_id,roblox_id,data) VALUES(?,?,?)', discordId, link.robloxId, JSON.stringify(player));
       await this.run('DELETE FROM links WHERE discord_id=?', discordId);
@@ -770,9 +778,14 @@ export class MatchmakingService implements ServiceContract {
       const base = calculateElo({
         elo: player.elo, teamAverage: averages[participant.team],
         opponentAverage: averages[participant.team === 'A' ? 'B' : 'A'],
-        won, mvp, vip: participant.vip,
+        won, mvp, vip: participant.vip, calibrating: player.matches < 5,
       }).delta;
-      const delta = participant.autofill ? autofillDelta(base) : base;
+      // Elo secreto da role jogada: decide se o autofill ganha 2x (só quem é novo ou fraco nela).
+      const role = await this.row<{ elo: number; games: number }>('SELECT elo, games FROM role_elo WHERE discord_id=? AND role=?', player.discordId, participant.position)
+        ?? { elo: player.elo, games: participant.position === player.position ? player.matches : 0 };
+      const delta = participant.autofill ? autofillGain(base, role, player.elo) : base;
+      await this.run('INSERT INTO role_elo(discord_id,role,elo,games) VALUES(?,?,?,?) ON CONFLICT(discord_id,role) DO UPDATE SET elo=excluded.elo, games=excluded.games',
+        player.discordId, participant.position, Math.max(0, role.elo + delta), role.games + 1);
       player.elo += delta;
       player.bestElo = Math.max(player.bestElo, player.elo);
       player.matches++;

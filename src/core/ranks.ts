@@ -24,6 +24,14 @@ export function rankFor(elo: number) {
   return { rank, nextRank, progress };
 }
 
+/** Elo inicial de todo jogador novo (e de todos no reset de temporada). */
+export const START_ELO = 1000;
+
+/**
+ * Elo simétrico: num jogo equilibrado a vitória dá ~+16 e a derrota tira ~-16, então ninguém sobe só por jogar.
+ * A força de cada jogador mistura o próprio Elo com a média do time; vencer time mais forte vale mais.
+ * Nas 5 primeiras partidas (calibração) tudo vale o dobro.
+ */
 export function calculateElo(input: {
   elo: number;
   teamAverage: number;
@@ -31,12 +39,14 @@ export function calculateElo(input: {
   won: boolean;
   mvp: boolean;
   vip: VipTier;
+  calibrating?: boolean;
 }) {
-  const expected = 1 / (1 + 10 ** ((input.opponentAverage - input.teamAverage) / 400));
-  const base = input.won ? Math.round(24 + 16 * (1 - expected)) : -Math.round(12 + 12 * expected);
-  const protectedBase = !input.won && input.elo < 300 ? Math.max(base, -10) : base;
+  const strength = (input.elo + input.teamAverage) / 2;
+  const expected = 1 / (1 + 10 ** ((input.opponentAverage - strength) / 400));
+  const k = input.calibrating ? 64 : 32;
+  const base = Math.round(k * ((input.won ? 1 : 0) - expected));
   const vipBonus = input.won ? Math.round(base * (input.vip === 'vip_plus' ? 0.15 : input.vip === 'vip' ? 0.1 : 0)) : 0;
   const mvpBonus = input.mvp ? 4 : 0;
-  const delta = Math.max(0, input.elo + protectedBase + vipBonus) - input.elo + mvpBonus;
-  return { delta, base: protectedBase, vipBonus, mvpBonus, expected };
+  const delta = Math.max(0, input.elo + base + vipBonus) - input.elo + mvpBonus;
+  return { delta, base, vipBonus, mvpBonus, expected };
 }

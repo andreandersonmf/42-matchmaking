@@ -41,7 +41,7 @@ test('ranking combina busca, posição, patente e paginação com limites válid
     assert.equal(page.players.length, 5);
     assert.equal(page.total, 15);
     assert.equal(page.pages, 2);
-    const filtered = await (await fetch(`${base}/api/players?position=setter&tier=Bronze&search=roblox1`)).json();
+    const filtered = await (await fetch(`${base}/api/players?position=setter&tier=Platinum&search=roblox1`)).json();
     assert.equal(filtered.total, 3);
     const invalid = await (await fetch(`${base}/api/players?page=-1&limit=NaN`)).json();
     assert.equal(invalid.page, 1);
