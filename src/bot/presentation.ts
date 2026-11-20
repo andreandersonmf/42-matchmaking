@@ -67,7 +67,7 @@ export function queuePresentation(queue: QueueState, siteUrl?: string): PanelPay
     '',
     'Primeira vez? Use **/register roblox:seu_usuario posicao:spiker**, coloque o código na descrição Roblox e execute **/verificar**.',
     'Clique em **Entrar na fila** e escolha sua posição de prioridade. Com **12 jogadores** a partida começa sozinha. Use **/profile** e **/ranking** quando precisar.',
-    'Cada equipe tem 4 spikers e 2 setters, e os mais antigos de cada posição entram primeiro. Se faltar uma posição, os últimos a entrar da outra tomam **autofill**: ganham o dobro de Elo na vitória e perdem só metade na derrota.',
+    'Cada equipe tem 4 spikers e 2 setters, e os mais antigos de cada posição entram primeiro. Se faltar uma posição, os últimos a entrar da outra tomam **autofill**: perdem só metade na derrota e ganham o dobro na vitória se forem novos ou fracos naquela posição.',
   ].join('\n')).addFields(
     { name: `SPIKERS · ${queue.spikers}`, value: positions('spiker'), inline: true },
     { name: `SETTERS · ${queue.setters}`, value: positions('setter'), inline: true },
@@ -81,7 +81,7 @@ export function queuePresentation(queue: QueueState, siteUrl?: string): PanelPay
 
 function playerLine(player: MatchPlayer): string {
   const captain = player.isCaptain ? ' [C]' : '';
-  const vip = (player.vip !== 'none' ? ` · ${vipNames[player.vip]}` : '') + (player.autofill ? ' · Autofill (2x Elo)' : '');
+  const vip = (player.vip !== 'none' ? ` · ${vipNames[player.vip]}` : '') + (player.autofill ? ' · Autofill' : '');
   const delta = player.eloDelta === null ? '' : ` · ${player.eloDelta >= 0 ? '+' : ''}${player.eloDelta}`;
   return `**${text(player.robloxName, 20)}**${captain}${vip}\n${player.position === 'spiker' ? 'Spiker' : 'Setter'} · ${rankNamePt(rankFor(player.elo).rank.name)} · ${player.elo} Elo${delta}`;
 }
@@ -202,7 +202,7 @@ export function matchPresentation(match: Match, siteUrl?: string, interactive = 
 export function rolePrompt(): PanelPayload {
   return {
     content: '', allowedMentions: NO_MENTIONS,
-    embeds: [baseEmbed('ESCOLHA SUA POSIÇÃO', 'Qual posição você prefere jogar? Se faltar gente na outra posição, você pode tomar **autofill**: ganha o dobro de Elo na vitória e perde só metade na derrota.')],
+    embeds: [baseEmbed('ESCOLHA SUA POSIÇÃO', 'Qual posição você prefere jogar? Se faltar gente na outra posição, você pode tomar **autofill**: perde só metade na derrota e ganha o dobro na vitória se for novo ou fraco naquela posição.')],
     components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId('mm:q:spiker').setLabel('Spiker').setStyle(ButtonStyle.Danger),
       new ButtonBuilder().setCustomId('mm:q:setter').setLabel('Setter').setStyle(ButtonStyle.Danger),
