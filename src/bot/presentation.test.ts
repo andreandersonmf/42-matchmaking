@@ -1,7 +1,8 @@
+import { parseCustomId } from './access.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { MatchMode, MatchStatus } from '../core/types.js';
-import { captainCandidates, COLOR, draftCandidates, matchPresentation, queuePresentation, text } from './presentation.js';
+import { replaceable, captainCandidates, COLOR, draftCandidates, matchPresentation, queuePresentation, text } from './presentation.js';
 import { match, player, playerId } from './test-fixtures.js';
 
 const statuses: MatchStatus[] = ['voting', 'captains', 'drafting', 'ready', 'live', 'mvp', 'completed', 'cancelled'];
@@ -105,4 +106,17 @@ test('draft mostra o time sorteado para o primeiro pick e o pick aleatório por 
   assert.match(description, /Primeiro pick sorteado: \*\*Equipe B\*\*/);
   assert.match(description, /sorteia um jogador/);
   assert.doesNotMatch(description, /escolhe automaticamente/);
+});
+
+test('presença: Pronto/Sair no painel e só quem saiu ou expirou aparece para troca', () => {
+  const value = match({ status: 'drafting', mode: 'captains', draftTurn: 'A', readyDeadline: 1_000 });
+  value.players.forEach(p => { p.ready = true; });
+  value.players[0].isCaptain = true; value.players[0].ready = false;
+  value.players[3].left = true; value.players[3].ready = false;
+  value.players[4].ready = false;
+  assert.deepEqual(replaceable(value, 500).map(p => p.discordId), [playerId(3)]);
+  assert.deepEqual(replaceable(value, 2_000).map(p => p.discordId), [playerId(3), playerId(4)]);
+  const ids = matchPresentation(value).components.flatMap(row => row.toJSON().components.map(c => 'custom_id' in c ? c.custom_id : ''));
+  assert.ok(ids.includes('mm:m:42:ready') && ids.includes('mm:m:42:leave') && ids.includes('mm:m:42:sub'));
+  assert.deepEqual(parseCustomId(`mm:m:42:subin:${playerId(3)}`), { kind: 'subin', matchId: 42, outId: playerId(3) });
 });

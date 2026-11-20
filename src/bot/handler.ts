@@ -1,9 +1,9 @@
-import { AttachmentBuilder, ChannelType, MessageFlags, type Guild, type ChatInputCommandInteraction, type Client, type Interaction, type ButtonInteraction, type StringSelectMenuInteraction } from 'discord.js';
+import { ActionRowBuilder, AttachmentBuilder, ChannelType, StringSelectMenuBuilder, MessageFlags, type Guild, type ChatInputCommandInteraction, type Client, type Interaction, type ButtonInteraction, type StringSelectMenuInteraction } from 'discord.js';
 import { DomainError } from '../core/engine.js';
 import type { Match, Position, ServiceContract, Team, VipTier } from '../core/types.js';
 import type { BotEnvironment } from './env.js';
 import { BotError, errorDetail, parseCustomId, requireOwner, requireParticipant, requireStaff, safeError, selectedPlayer, type Actor } from './access.js';
-import { baseEmbed, draftCandidates, NO_MENTIONS, queuePresentation, relativeTime, rolePrompt, text, vipNames } from './presentation.js';
+import { baseEmbed, draftCandidates, NO_MENTIONS, plain, replaceable, queuePresentation, relativeTime, rolePrompt, text, vipNames } from './presentation.js';
 import { createRoom } from './voice.js';
 import { renderProfile } from './profile.js';
 import { renderRanking } from './ranking.js';
@@ -255,7 +255,7 @@ export function createInteractionHandler(deps: HandlerDependencies): (interactio
     let actor: Actor | undefined;
     if (action.kind === 'start') actor = await deps.resolveActor(interaction);
     const match = await matchById(service, action.matchId);
-    if (!match.messageId || match.messageId !== interaction.message.id || match.channelId !== interaction.channelId) {
+    if (action.kind !== 'subin' && (!match.messageId || match.messageId !== interaction.message.id || match.channelId !== interaction.channelId)) {
       throw new BotError('Este painel foi substituído. Use a mensagem atual da partida no canal original.');
     }
     const id = interaction.user.id;
@@ -271,6 +271,40 @@ export function createInteractionHandler(deps: HandlerDependencies): (interactio
       if (match.status !== 'captains') throw new BotError('A votação de capitão já terminou. Confira o painel atualizado.');
       await service.voteCaptain(match.id, id, selectedPlayer(interaction.values));
       confirmation = 'Seu voto de capitão foi registrado.';
+    } else if (action.kind === 'ready' || action.kind === 'leave') {
+      if (!interaction.isButton()) throw new BotError('Controle de presença inválido.');
+      requireParticipant(match, id);
+      if (action.kind === 'ready') await service.setReady(match.id, id);
+      else await service.leaveMatch(match.id, id);
+      confirmation = action.kind === 'ready' ? 'Presença confirmada.' : 'Você saiu da partida. Os capitães podem colocar alguém da fila no seu lugar.';
+    } else if (action.kind === 'sub' || action.kind === 'subin') {
+      if (!interaction.isStringSelectMenu()) throw new BotError('Controle de troca inválido. Use o painel atualizado.');
+      if (!match.players.some(player => player.isCaptain && player.discordId === id)) requireStaff(await deps.resolveActor(interaction), config);
+      if (action.kind === 'sub') {
+        const out = match.players.find(player => player.discordId === selectedPlayer(interaction.values));
+        if (!out || !replaceable(match).includes(out)) throw new BotError('Esse jogador não pode ser trocado agora. Use o painel atualizado.');
+        const candidates = (await service.getQueue()).players
+          .sort((a, b) => Number(b.position === out.position) - Number(a.position === out.position) || Math.abs(a.elo - out.elo) - Math.abs(b.elo - out.elo))
+          .slice(0, 25);
+        if (!candidates.length) throw new BotError('Ninguém na fila para entrar. Peça para alguém entrar na fila e tente de novo.');
+        await interaction.editReply({ content: '', allowedMentions: NO_MENTIONS,
+          embeds: [baseEmbed('ESCOLHA O SUBSTITUTO', `Quem entra no lugar de **${text(out.robloxName, 20)}**? Os primeiros são sugestão: mesma posição e Elo mais próximo.`)],
+          components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(new StringSelectMenuBuilder()
+            .setCustomId(`mm:m:${match.id}:subin:${out.discordId}`).setPlaceholder('Escolha quem entra').setMinValues(1).setMaxValues(1)
+            .addOptions(candidates.map(player => ({ label: plain(player.robloxName, 40), value: player.discordId,
+              description: `${player.position === 'spiker' ? 'Spiker' : 'Setter'} · ${player.elo} Elo` }))))] });
+        return;
+      }
+      if (action.kind !== 'subin') throw new BotError('Controle de troca inválido.');
+      const { outId } = action;
+      const inId = selectedPlayer(interaction.values);
+      await service.substitute(match.id, id, outId, inId);
+      const room = interaction.channel;
+      if (room && 'permissionOverwrites' in room) {
+        await room.permissionOverwrites.create(inId, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true }).catch(() => undefined);
+        await room.permissionOverwrites.delete(outId).catch(() => undefined);
+      }
+      confirmation = 'Troca feita. O substituto já está na vaga e na sala.';
     } else if (action.kind === 'win') {
       if (!interaction.isButton() || match.status !== 'live') throw new BotError('A partida não está ao vivo. Confira o painel atualizado.');
       const updated = await service.reportResult(match.id, id, action.team);

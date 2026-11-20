@@ -23,6 +23,8 @@ type StoredMatch = Match & {
 };
 const CAPTAIN_VOTE_MS = 30_000;
 const QUEUE_TTL_MS = 30 * 60_000;
+const READY_MS = 2 * 60_000;
+const BEFORE_GAME = ['captains', 'drafting', 'ready'];
 type JsonRow = { data: string };
 type DbHandle = { execute(stmt: InStatement): Promise<ResultSet> };
 const MODES: MatchMode[] = ['balanced', 'captains', 'random'];
@@ -436,7 +438,7 @@ export class MatchmakingService implements ServiceContract {
         initiatorId, mode: null, modeDeadline: createdAt + 30_000, mvpDeadline: null,
         draftDeadline: null, draftTurn: null, firstPick: null, winner: null, mvpId: null, channelId, messageId: null,
         votes: { captains: 0, balanced: 0, random: 0 }, modeVoters: 0, mvpVoters: 0,
-        modeBallots: {}, mvpBallots: {}, draftIndex: 0,
+        modeBallots: {}, mvpBallots: {}, draftIndex: 0, readyDeadline: createdAt + READY_MS,
         players: selected.map(player => ({
           discordId: player.discordId, name: player.name, robloxId: player.robloxId, robloxName: player.robloxName,
           elo: player.elo, position: player.position, autofill: player.autofill, vip: player.vip, team: null, isCaptain: false,
@@ -637,6 +639,8 @@ export class MatchmakingService implements ServiceContract {
       const match = await this.readStored(id);
       // Quem pode iniciar (capitão ou Match Organizer) é checado no bot, que conhece os cargos.
       assert(match.status === 'ready', 'A partida precisa ter os times definidos antes de começar.');
+      const missing = match.players.filter(player => !player.ready && match.readyDeadline != null);
+      assert(!missing.length, `Faltam ${missing.length} jogador(es) confirmarem presença. Troque quem saiu ou ficou inativo.`);
       for (const team of ['A', 'B']) {
         const players = match.players.filter(player => player.team === team);
         assert(players.filter(player => player.position === 'spiker').length === 4 && players.filter(player => player.position === 'setter').length === 2, 'Composição inválida: cada time deve ter 4 Spikers e 2 Setters.');
@@ -669,6 +673,56 @@ export class MatchmakingService implements ServiceContract {
         await this.audit(captainId, 'match.result', { matchId: id, winner, byCaptains: true });
       }
       await this.saveMatch(match);
+      return this.publicMatch(match);
+    });
+  }
+
+  async setReady(id: number, playerId: string): Promise<Match> {
+    return this.transaction(async () => {
+      const match = await this.readStored(id);
+      assert(BEFORE_GAME.includes(match.status), 'A partida já começou ou terminou.');
+      const player = match.players.find(p => p.discordId === playerId);
+      assert(player && !player.left, 'Somente os jogadores desta partida podem confirmar presença.');
+      player.ready = true;
+      await this.saveMatch(match);
+      return this.publicMatch(match);
+    });
+  }
+
+  async leaveMatch(id: number, playerId: string): Promise<Match> {
+    return this.transaction(async () => {
+      const match = await this.readStored(id);
+      assert(BEFORE_GAME.includes(match.status), 'O jogo já começou; peça à staff para cancelar se precisar.');
+      const player = match.players.find(p => p.discordId === playerId);
+      assert(player, 'Você não está nesta partida.');
+      assert(!player.isCaptain, 'Capitão não pode sair. Peça à staff para cancelar a partida.');
+      player.left = true;
+      player.ready = false;
+      await this.saveMatch(match);
+      return this.publicMatch(match);
+    });
+  }
+
+  /** Quem saiu, ou não confirmou presença no prazo, pode ser trocado por alguém da fila na mesma vaga. */
+  async substitute(id: number, actorId: string, outId: string, inId: string): Promise<Match> {
+    return this.transaction(async () => {
+      const match = await this.readStored(id);
+      assert(BEFORE_GAME.includes(match.status), 'Só dá para trocar jogador antes do jogo começar.');
+      const slot = match.players.find(p => p.discordId === outId);
+      assert(slot, 'Esse jogador não está nesta partida.');
+      assert(!slot.isCaptain, 'Capitão não pode ser trocado.');
+      assert(slot.left || (!slot.ready && match.readyDeadline != null && this.now() >= match.readyDeadline),
+        'Só dá para trocar quem saiu ou não confirmou presença em 2 minutos.');
+      assert(await this.row('SELECT discord_id FROM queue WHERE discord_id=?', inId), 'O substituto precisa estar na fila.');
+      const player = await this.requiredPlayer(inId);
+      Object.assign(slot, {
+        discordId: player.discordId, name: player.name, robloxId: player.robloxId, robloxName: player.robloxName,
+        elo: player.elo, vip: player.vip, autofill: player.position !== slot.position, ready: true, left: false, mvpVotes: 0,
+      });
+      delete match.captainBallots?.[outId];
+      await this.run('DELETE FROM queue WHERE discord_id=?', inId);
+      await this.saveMatch(match);
+      await this.audit(actorId, 'match.substitute', { matchId: id, outId, inId });
       return this.publicMatch(match);
     });
   }

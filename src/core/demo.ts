@@ -53,6 +53,7 @@ async function populateDemo(service: MatchmakingService, setClock: (time: number
     await enqueue(round);
     let match = await service.createMatch(DEMO_OWNER, 'demo');
     match = await resolve(match, (['balanced', 'captains', 'random'] as const)[round % 3]);
+    for (const player of match.players) match = await service.setReady(match.id, player.discordId);
     await service.startMatch(match.id, DEMO_OWNER);
     setClock(baseTime + round * 6 * 3_600_000 + 25 * 60_000);
     match = await service.finishMatch(match.id, DEMO_OWNER, round % 2 === 0 ? 'A' : 'B');
@@ -66,6 +67,7 @@ async function populateDemo(service: MatchmakingService, setClock: (time: number
   await enqueue(31);
   let current = await service.createMatch(DEMO_OWNER, 'demo');
   current = await resolve(current, 'balanced');
+  for (const player of current.players) current = await service.setReady(current.id, player.discordId);
   await service.startMatch(current.id, DEMO_OWNER);
   setClock(Date.now() - 90_000);
   const busy = new Set(current.players.map(player => player.discordId));

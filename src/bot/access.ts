@@ -38,20 +38,22 @@ export type ComponentAction =
   | { kind: 'queue'; action: Position | 'leave' | 'status' | 'join' | 'open' }
   | { kind: 'mode'; matchId: number; mode: MatchMode }
   | { kind: 'captain' | 'win'; matchId: number; team: Team }
-  | { kind: 'pick' | 'mvp' | 'start'; matchId: number };
+  | { kind: 'pick' | 'mvp' | 'start' | 'ready' | 'leave' | 'sub'; matchId: number }
+  | { kind: 'subin'; matchId: number; outId: string };
 
 export function parseCustomId(value: string): ComponentAction | null {
   if (value.length > 100) return null;
   const queue = /^mm:q:(spiker|setter|leave|status|join|open)$/.exec(value);
   if (queue) return { kind: 'queue', action: queue[1] as Position | 'leave' | 'status' | 'join' | 'open' };
-  const match = /^mm:m:([1-9]\d{0,15}):(mode:(captains|balanced|random)|cap:([AB])|win:([AB])|pick|mvp|start)$/.exec(value);
+  const match = /^mm:m:([1-9]\d{0,15}):(mode:(captains|balanced|random)|cap:([AB])|win:([AB])|subin:([1-9]\d{16,19})|pick|mvp|start|ready|leave|sub)$/.exec(value);
   if (!match) return null;
   const matchId = Number(match[1]);
   if (!Number.isSafeInteger(matchId)) return null;
   if (match[3]) return { kind: 'mode', matchId, mode: match[3] as MatchMode };
   if (match[4]) return { kind: 'captain', matchId, team: match[4] as Team };
   if (match[5]) return { kind: 'win', matchId, team: match[5] as Team };
-  return { kind: match[2] as 'pick' | 'mvp' | 'start', matchId };
+  if (match[6]) return { kind: 'subin', matchId, outId: match[6] };
+  return { kind: match[2] as 'pick' | 'mvp' | 'start' | 'ready' | 'leave' | 'sub', matchId };
 }
 
 export function selectedPlayer(values: readonly string[]): string {

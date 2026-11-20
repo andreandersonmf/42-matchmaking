@@ -44,6 +44,10 @@ export interface MatchPlayer {
   position: Position;
   /** Jogou fora da posição escolhida na fila. Ausente em partidas antigas. */
   autofill?: boolean;
+  /** Confirmou presença antes do jogo. */
+  ready?: boolean;
+  /** Saiu da partida antes do jogo; pode ser trocado. */
+  left?: boolean;
   elo: number;
   vip: VipTier;
   team: Team | null;
@@ -80,6 +84,8 @@ export interface Match {
   resultChannelId?: string | null;
   /** Vencedor informado pelo capitão de cada time. */
   resultReports?: Partial<Record<Team, Team>>;
+  /** Até quando os jogadores confirmam presença; depois disso quem não confirmou pode ser trocado. */
+  readyDeadline?: number | null;
 }
 
 export interface QueueEntry extends Player { queuedAt: number }
@@ -151,6 +157,9 @@ export interface ServiceContract {
   setCaptain(id: number, actorId: string, team: Team, playerId: string): Promise<Match>;
   voteCaptain(id: number, voterId: string, candidateId: string): Promise<Match>;
   reportResult(id: number, captainId: string, winner: Team): Promise<Match>;
+  setReady(id: number, playerId: string): Promise<Match>;
+  leaveMatch(id: number, playerId: string): Promise<Match>;
+  substitute(id: number, actorId: string, outId: string, inId: string): Promise<Match>;
   moveToRoom(id: number, roomId: string): Promise<void>;
   pick(id: number, captainId: string, playerId: string): Promise<Match>;
   startMatch(id: number, actorId: string): Promise<Match>;

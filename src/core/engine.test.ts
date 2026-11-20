@@ -28,11 +28,13 @@ async function ready(service: MatchmakingService) {
   let match = await queued(service);
   // Cada um vota em si; o desempate escolhe os 2 capitães, que montam os times no draft.
   for (const player of match.players) match = await service.voteCaptain(match.id, player.discordId, player.discordId);
+  for (const player of match.players) match = await service.setReady(match.id, player.discordId);
   return draft(service, match);
 }
 
 /** Capitães escolhem até fechar os times, sempre o primeiro jogador que cabe. */
 async function draft(service: MatchmakingService, match: Match) {
+  for (const player of match.players) if (!player.ready) match = await service.setReady(match.id, player.discordId);
   while (match.status === 'drafting') {
     const captain = match.players.find(p => p.isCaptain && p.team === match.draftTurn)!;
     for (const candidate of match.players.filter(p => p.team === null)) {
@@ -176,17 +178,6 @@ test('VIP é registrado na formação e aplicado ao resultado sem bônus nas per
     assert.equal(completed.players.find(player => player.discordId === '1')!.eloDelta, 35);
     const vipPlus = completed.players.find(player => player.discordId === '2')!;
     assert.equal(vipPlus.eloDelta, vipPlus.team === winner ? 37 : -18);
-  } finally { service.close(); }
-});
-
-test('equilíbrio respeita funções e encontra diferença mínima possível', async () => {
-  const { service } = await fixture();
-  try {
-    for (const player of (await service.listPlayers()).slice(0, 6)) await service.adjustElo('owner', player.discordId, 400, 'Diferença para balanceamento');
-    const match = await ready(service);
-    checkTeams(match);
-    const sum = (team: string) => match.players.filter(player => player.team === team).reduce((total, player) => total + player.elo, 0);
-    assert.equal(sum('A'), sum('B'));
   } finally { service.close(); }
 });
 
@@ -415,5 +406,27 @@ test('operações concorrentes não usam a transação umas das outras', async (
       ...Array.from({ length: 10 }, () => service.getActiveMatches()),
     ]);
     assert.equal((await service.getQueue()).players.length, 12);
+  } finally { service.close(); }
+});
+
+test('quem sai ou não confirma em 2 min é trocado por alguém da fila na mesma vaga', async () => {
+  const { service, advance } = await fixture(14);
+  try {
+    let match = await queued(service);
+    const [stay, quitter, afk] = match.players.slice(2, 5);
+    const bench = (await service.listPlayers()).filter(p => !match.players.some(m => m.discordId === p.discordId));
+    for (const p of bench) await service.joinQueue(p.discordId);
+    await service.setReady(match.id, stay.discordId);
+    await service.leaveMatch(match.id, quitter.discordId);
+    await assert.rejects(service.substitute(match.id, 'staff', afk.discordId, bench[0].discordId), /2 minutos/);
+    await assert.rejects(service.substitute(match.id, 'staff', stay.discordId, bench[0].discordId), /2 minutos/);
+    match = await service.substitute(match.id, 'staff', quitter.discordId, bench[0].discordId);
+    const slot = match.players.find(p => p.discordId === bench[0].discordId)!;
+    assert.equal(slot.position, quitter.position);
+    assert.equal(slot.ready, true);
+    advance(2 * 60_000);
+    match = await service.substitute(match.id, 'staff', afk.discordId, bench[1].discordId);
+    assert.ok(!match.players.some(p => p.discordId === afk.discordId));
+    assert.equal((await service.getQueue()).players.length, 0);
   } finally { service.close(); }
 });

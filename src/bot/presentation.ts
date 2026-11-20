@@ -180,7 +180,22 @@ export function matchPresentation(match: Match, siteUrl?: string, interactive = 
     }
   }
   embed.addFields({ name: 'COMPOSIÇÃO', value: `${match.players.length}/12 jogadores · ${match.players.filter(player => player.position === 'spiker').length} spikers + ${match.players.filter(player => player.position === 'setter').length} setters\nPor equipe: 4 spikers (S) + 2 setters (L). Capitão: [C].` });
-  return { content: '', embeds: [embed], components: [...components, ...siteRow(siteUrl)], allowedMentions: NO_MENTIONS };
+  if (['captains', 'drafting', 'ready'].includes(match.status) && match.readyDeadline != null) {
+    const waiting = match.players.filter(player => !player.ready);
+    const swappable = replaceable(match);
+    embed.addFields({ name: `PRESENÇA · ${12 - waiting.length}/12`, value: waiting.length
+      ? `Faltam confirmar: ${waiting.map(player => `${text(player.robloxName, 20)}${player.left ? ' (saiu)' : ''}`).join(', ')}.\nQuem sair ou não confirmar ${relativeTime(match.readyDeadline)} pode ser trocado pelos capitães.`
+      : 'Todos confirmaram.' });
+    components.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId(`mm:m:${match.id}:ready`).setLabel('Pronto').setStyle(ButtonStyle.Success).setDisabled(!interactive),
+      new ButtonBuilder().setCustomId(`mm:m:${match.id}:leave`).setLabel('Sair da partida').setStyle(ButtonStyle.Secondary).setDisabled(!interactive)));
+    if (swappable.length) components.push(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+      new StringSelectMenuBuilder().setCustomId(`mm:m:${match.id}:sub`).setPlaceholder('Capitães: trocar jogador que saiu ou está inativo')
+        .setMinValues(1).setMaxValues(1).setDisabled(!interactive).addOptions(swappable.map(player => ({
+          label: plain(player.robloxName, 40), value: player.discordId, description: player.left ? 'Saiu da partida' : 'Não confirmou presença',
+        })))));
+  }
+  return { content: '', embeds: [embed], components: [...components, ...siteRow(siteUrl)].slice(0, 5), allowedMentions: NO_MENTIONS };
 }
 
 /** Resposta privada ao clicar em Entrar na fila: a pessoa escolhe a posição de prioridade. */
@@ -204,4 +219,9 @@ export function hostPanel(): PanelPayload {
       new ButtonBuilder().setCustomId('mm:q:open').setLabel('Abrir fila').setStyle(ButtonStyle.Success),
     )],
   };
+}
+
+/** Jogadores que podem ser trocados: saíram, ou não confirmaram presença dentro do prazo. Capitão nunca. */
+export function replaceable(match: Match, now = Date.now()): MatchPlayer[] {
+  return match.players.filter(player => !player.isCaptain && (player.left || (!player.ready && match.readyDeadline != null && now >= match.readyDeadline)));
 }
