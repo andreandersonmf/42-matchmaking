@@ -1,4 +1,5 @@
 import { PermissionFlagsBits } from 'discord.js';
+import { DomainError } from '../core/engine.js';
 import type { Match, MatchMode, Position, Team } from '../core/types.js';
 import type { BotEnvironment } from './env.js';
 import { snowflake } from './env.js';
@@ -34,21 +35,22 @@ export function requireParticipant(match: Match, id: string): void {
 }
 
 export type ComponentAction =
-  | { kind: 'queue'; action: Position | 'leave' | 'status' }
+  | { kind: 'queue'; action: Position | 'leave' | 'status' | 'join' | 'open' }
   | { kind: 'mode'; matchId: number; mode: MatchMode }
-  | { kind: 'captain'; matchId: number; team: Team }
+  | { kind: 'captain' | 'win'; matchId: number; team: Team }
   | { kind: 'pick' | 'mvp' | 'start'; matchId: number };
 
 export function parseCustomId(value: string): ComponentAction | null {
   if (value.length > 100) return null;
-  const queue = /^mm:q:(spiker|setter|leave|status)$/.exec(value);
-  if (queue) return { kind: 'queue', action: queue[1] as Position | 'leave' | 'status' };
-  const match = /^mm:m:([1-9]\d{0,15}):(mode:(captains|balanced|random)|cap:([AB])|pick|mvp|start)$/.exec(value);
+  const queue = /^mm:q:(spiker|setter|leave|status|join|open)$/.exec(value);
+  if (queue) return { kind: 'queue', action: queue[1] as Position | 'leave' | 'status' | 'join' | 'open' };
+  const match = /^mm:m:([1-9]\d{0,15}):(mode:(captains|balanced|random)|cap:([AB])|win:([AB])|pick|mvp|start)$/.exec(value);
   if (!match) return null;
   const matchId = Number(match[1]);
   if (!Number.isSafeInteger(matchId)) return null;
   if (match[3]) return { kind: 'mode', matchId, mode: match[3] as MatchMode };
   if (match[4]) return { kind: 'captain', matchId, team: match[4] as Team };
+  if (match[5]) return { kind: 'win', matchId, team: match[5] as Team };
   return { kind: match[2] as 'pick' | 'mvp' | 'start', matchId };
 }
 
@@ -58,5 +60,10 @@ export function selectedPlayer(values: readonly string[]): string {
 }
 
 export function safeError(error: unknown, fallback = 'Não foi possível concluir esta ação. Confira seu cadastro com /profile e o estado atual no painel da fila ou da partida. Se persistir, procure a staff.'): string {
-  return error instanceof BotError ? error.message : fallback;
+  return error instanceof BotError || error instanceof DomainError ? error.message : fallback;
+}
+
+/** Motivo curto de um erro inesperado, para o log do bot (sem stack). */
+export function errorDetail(error: unknown): string {
+  return error instanceof Error ? ` Motivo: ${error.name}: ${error.message.slice(0, 200)}` : '';
 }

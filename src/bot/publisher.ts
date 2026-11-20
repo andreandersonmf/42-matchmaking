@@ -1,7 +1,7 @@
 import { ChannelType, PermissionFlagsBits, type Client, type NewsChannel, type TextChannel } from 'discord.js';
 import type { Match, ServiceContract } from '../core/types.js';
 import type { BotEnvironment } from './env.js';
-import { BotError } from './access.js';
+import { BotError, errorDetail } from './access.js';
 import { matchPresentation, queuePresentation, type PanelPayload } from './presentation.js';
 import { renderResult } from './result.js';
 
@@ -140,7 +140,7 @@ export class Publisher {
         this.resultSent.add(id);
         return;
       }
-      const channelId = this.config.resultChannelId ?? match.channelId ?? this.config.matchChannelId;
+      const channelId = this.config.resultChannelId ?? match.resultChannelId ?? match.channelId ?? this.config.matchChannelId;
       if (!channelId) throw new BotError('Esta partida não possui canal para o resultado. Configure DISCORD_RESULT_CHANNEL_ID ou DISCORD_MATCH_CHANNEL_ID.');
       const render = async () => {
         const current = await this.service.getMatch(id);
@@ -155,6 +155,11 @@ export class Publisher {
       this.resultPending.add(id);
       throw error;
     });
+  }
+
+  /** Reaproveita um painel de fila já publicado (após reinício do bot). */
+  adoptPanel(channelId: string, messageId: string): void {
+    this.panels.set(channelId, messageId);
   }
 
   publishQueue(channelId: string): Promise<void> {
@@ -173,7 +178,8 @@ export class Publisher {
     const signature = JSON.stringify(await this.service.getQueue());
     if (signature === this.queueSignature) return;
     const results = await Promise.allSettled([...this.panels.keys()].map(channel => this.publishQueue(channel)));
-    if (results.some(result => result.status === 'rejected')) throw new Error('Painel da fila indisponível.');
+    const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    if (failed) throw new Error(`Painel da fila indisponível.${errorDetail(failed.reason)}`);
     this.queueSignature = signature;
   }
 }
@@ -205,8 +211,8 @@ export class Lifecycle {
       const published = await Promise.allSettled(resultIds.map(id => this.publisher.publishResult(id)));
       if (published.some(result => result.status === 'rejected')) this.report('Não foi possível publicar um resultado no canal de resultados. Nova tentativa no próximo ciclo.');
       await this.publisher.refreshQueues();
-    } catch {
-      this.report('Não foi possível concluir o ciclo de atualização. Nova tentativa no próximo ciclo.');
+    } catch (error) {
+      this.report(`Não foi possível concluir o ciclo de atualização. Nova tentativa no próximo ciclo.${errorDetail(error)}`);
     } finally {
       this.running = false;
     }

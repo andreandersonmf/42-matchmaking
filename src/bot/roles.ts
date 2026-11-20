@@ -25,12 +25,14 @@ export const ELO_ROLES: Record<string, string> = {
   'Diamond II': '1408818973205598243',
   'Diamond III': '1408818973205598244',
   'Diamond IV': '1408818973205598245',
-  Master: '1408818973226565632',
-  Grandmaster: '1408818973226565636',
+  // O rank Master/Grandmaster é único; o servidor tem divisões I–IV e usa a I.
+  Master: '1408818973205598246',
+  Grandmaster: '1408818973226565634',
   Challenger: '1408818973226565638',
 };
 
-const ELO_ROLE_IDS = new Set(Object.values(ELO_ROLES));
+// Inclui as divisões II–IV de Master e Grandmaster para remover cargos antigos.
+const ELO_ROLE_IDS = new Set([...Object.values(ELO_ROLES), '1408818973205598247', '1408818973226565632', '1408818973226565633', '1408818973226565635', '1408818973226565636', '1408818973226565637']);
 
 export function rankRoleId(elo: number): string {
   return ELO_ROLES[rankFor(elo).rank.name] ?? ELO_ROLES['Bronze I'];

@@ -1,8 +1,10 @@
-import { AttachmentBuilder, MessageFlags, type ChatInputCommandInteraction, type Client, type Interaction, type ButtonInteraction, type StringSelectMenuInteraction } from 'discord.js';
+import { AttachmentBuilder, ChannelType, MessageFlags, type Guild, type ChatInputCommandInteraction, type Client, type Interaction, type ButtonInteraction, type StringSelectMenuInteraction } from 'discord.js';
+import { DomainError } from '../core/engine.js';
 import type { Match, Position, ServiceContract, Team, VipTier } from '../core/types.js';
 import type { BotEnvironment } from './env.js';
-import { BotError, parseCustomId, requireInitiator, requireOwner, requireParticipant, requireStaff, safeError, selectedPlayer, type Actor } from './access.js';
-import { baseEmbed, captainCandidates, draftCandidates, NO_MENTIONS, queuePresentation, relativeTime, text, vipNames } from './presentation.js';
+import { BotError, errorDetail, parseCustomId, requireOwner, requireParticipant, requireStaff, safeError, selectedPlayer, type Actor } from './access.js';
+import { baseEmbed, draftCandidates, NO_MENTIONS, queuePresentation, relativeTime, rolePrompt, text, vipNames } from './presentation.js';
+import { createRoom } from './voice.js';
 import { renderProfile } from './profile.js';
 import { renderRanking } from './ranking.js';
 import { getDescription, lookupUsername } from './roblox.js';
@@ -67,7 +69,7 @@ export function createInteractionHandler(deps: HandlerDependencies): (interactio
   };
   const updateQueue = async () => {
     try { await publisher.refreshQueues(); }
-    catch { report('Não foi possível atualizar um painel de fila. O próximo ciclo tentará novamente.'); }
+    catch (error) { report(`Não foi possível atualizar um painel de fila. O próximo ciclo tentará novamente.${errorDetail(error)}`); }
   };
   const updateMatch = async (id: number): Promise<string> => {
     try { await publisher.refreshMatch(id); return ''; }
@@ -78,6 +80,26 @@ export function createInteractionHandler(deps: HandlerDependencies): (interactio
   };
   const assertRegistered = async (id: string) => {
     if (!await service.getPlayer(id)) throw new BotError('Você ainda não possui uma conta verificada. Use /register roblox:seu_usuario posicao:spiker, coloque o código na descrição Roblox e execute /verificar.');
+  };
+
+  let queueOwner: string | undefined;
+  /** Cria a partida com a fila atual, abre a sala privada e devolve o texto de confirmação. */
+  const formMatch = async (guild: Guild | null, initiatorId: string, fallbackChannelId: string): Promise<string> => {
+    const results = guild?.channels.cache.find(c => c.type === ChannelType.GuildText && c.name.toLowerCase().includes('results'));
+    const match = await service.createMatch(initiatorId, results?.id ?? fallbackChannelId);
+    let room = '';
+    if (guild) {
+      try {
+        const created = await createRoom(guild, match, config.staffRoleId);
+        await service.moveToRoom(match.id, created.id);
+        room = ` Sala privada: <#${created.id}>.`;
+      } catch {
+        report('Não foi possível criar a sala privada da partida; o painel fica no canal de resultados.');
+      }
+    }
+    const note = await updateMatch(match.id);
+    await updateQueue();
+    return `**Partida #${match.id}** formada com times balanceados por Elo.${room} Cada time vota no seu capitão; um capitão manda o link e inicia o jogo.${note}`;
   };
 
   async function command(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -135,15 +157,11 @@ export function createInteractionHandler(deps: HandlerDependencies): (interactio
         const channelId = config.matchChannelId ?? interaction.channelId;
         if (!channelId) throw new BotError('Não foi possível identificar um canal para a partida.');
         await transport.assertChannel(channelId);
-        const match = await service.createMatch(actor!.id, channelId);
-        const note = await updateMatch(match.id);
-        await updateQueue();
-        await info(interaction, 'PARTIDA CRIADA', `**Partida #${match.id}** formada. Os 12 jogadores podem votar no modo durante 30 segundos.\nDepois das equipes definidas, use o botão **Iniciar jogo** no painel.${note}`);
+        await info(interaction, 'PARTIDA CRIADA', await formMatch(interaction.guild, actor!.id, channelId));
         return;
       }
       case 'finalizar': {
         const match = await matchById(service, options.getInteger('partida', true));
-        requireInitiator(actor!, match, config);
         if (match.status !== 'live') throw new BotError('Somente partidas ao vivo podem ser finalizadas. Confira o estado atual no painel.');
         const winner = options.getString('vencedor', true);
         if (winner !== 'A' && winner !== 'B') throw new BotError('Informe a equipe vencedora: A ou B.');
@@ -204,15 +222,34 @@ export function createInteractionHandler(deps: HandlerDependencies): (interactio
     if (!action) throw new BotError('Este controle é inválido ou está desatualizado. Use o painel mais recente.');
     if (action.kind === 'queue') {
       if (!interaction.isButton()) throw new BotError('Controle de fila inválido.');
+      if (action.action === 'open') {
+        const actor = await deps.resolveActor(interaction);
+        requireStaff(actor, config);
+        if (!interaction.channelId) throw new BotError('Use o painel em um canal de texto do servidor.');
+        queueOwner = actor.id;
+        await publisher.publishQueue(interaction.channelId);
+        await info(interaction, 'FILA ABERTA', 'O painel da fila está logo abaixo. Com 12 jogadores a partida é criada sozinha.');
+        return;
+      }
       if (action.action !== 'status') await assertRegistered(interaction.user.id);
+      if (action.action === 'join') { await interaction.editReply(rolePrompt()); return; }
       const queue = action.action === 'status' ? await service.getQueue() : action.action === 'leave'
         ? await service.leaveQueue(interaction.user.id) : await service.joinQueue(interaction.user.id, action.action);
+      if (queue.ready && (action.action === 'spiker' || action.action === 'setter')) {
+        try {
+          await info(interaction, 'FILA COMPLETA', await formMatch(interaction.guild, queueOwner ?? config.ownerId, interaction.channelId!));
+          return;
+        } catch {
+          report('A fila completou, mas a partida não pôde ser criada. A staff pode usar /iniciar.');
+        }
+      }
       await updateQueue();
-      await interaction.editReply(queuePresentation(queue, config.siteUrl));
+      if (action.action === 'status') await interaction.editReply(queuePresentation(queue, config.siteUrl));
+      else await info(interaction, action.action === 'leave' ? 'VOCÊ SAIU DA FILA' : 'VOCÊ ESTÁ NA FILA', `**${queue.players.length}/12** na fila. Com 12 jogadores a partida começa sozinha.`);
       return;
     }
     let actor: Actor | undefined;
-    if (action.kind === 'start' || action.kind === 'captain') actor = await deps.resolveActor(interaction);
+    if (action.kind === 'start') actor = await deps.resolveActor(interaction);
     const match = await matchById(service, action.matchId);
     if (!match.messageId || match.messageId !== interaction.message.id || match.channelId !== interaction.channelId) {
       throw new BotError('Este painel foi substituído. Use a mensagem atual da partida no canal original.');
@@ -226,15 +263,17 @@ export function createInteractionHandler(deps: HandlerDependencies): (interactio
       confirmation = 'Seu voto de modo foi registrado. A contagem pública será atualizada, sem expor sua escolha individual.';
     } else if (action.kind === 'captain') {
       if (!interaction.isStringSelectMenu()) throw new BotError('Controle de capitão inválido. Use o painel atualizado.');
-      requireInitiator(actor!, match, config);
-      if (match.status !== 'captains') throw new BotError('A escolha dos capitães já foi concluída ou ainda não começou. Confira o painel atualizado.');
-      const candidateId = selectedPlayer(interaction.values);
-      if (!captainCandidates(match, action.team).some(player => player.discordId === candidateId)) throw new BotError('Esse jogador não pode ser capitão deste time. Ele pode já ser capitão do outro time; escolha uma opção do painel atualizado.');
-      const updated = await service.setCaptain(match.id, id, action.team, candidateId);
-      const chosen = updated.players.find(player => player.discordId === candidateId);
-      confirmation = updated.status === 'drafting'
-        ? `Capitão do Time ${action.team} definido: **${text(chosen?.robloxName ?? '', 20)}**. Os dois capitães estão prontos e o draft começou: o primeiro pick ficou com a **Equipe ${updated.firstPick}** (sorteio 50/50).`
-        : `Capitão do Time ${action.team} definido: **${text(chosen?.robloxName ?? '', 20)}**. Falta escolher o capitão do outro time.`;
+      requireParticipant(match, id);
+      if (match.status !== 'captains') throw new BotError('A votação de capitão já terminou. Confira o painel atualizado.');
+      await service.voteCaptain(match.id, id, selectedPlayer(interaction.values));
+      confirmation = 'Seu voto de capitão foi registrado.';
+    } else if (action.kind === 'win') {
+      if (!interaction.isButton() || match.status !== 'live') throw new BotError('A partida não está ao vivo. Confira o painel atualizado.');
+      const updated = await service.reportResult(match.id, id, action.team);
+      const reports = updated.resultReports ?? {};
+      confirmation = updated.status === 'mvp' ? `Resultado confirmado pelos dois capitães: **Equipe ${action.team}** venceu. A votação de MVP começou.`
+        : reports.A && reports.B ? 'Os capitães marcaram vencedores diferentes. Um Match Organizer precisa usar /finalizar.'
+        : 'Seu resultado foi registrado. Falta o capitão do outro time confirmar.';
     } else if (action.kind === 'pick') {
       if (!interaction.isStringSelectMenu() || match.status !== 'drafting') throw new BotError('O draft não está ativo. Use o painel atualizado.');
       const captain = match.players.find(player => player.isCaptain && player.team === match.draftTurn);
@@ -245,7 +284,7 @@ export function createInteractionHandler(deps: HandlerDependencies): (interactio
       confirmation = 'Escolha registrada. O painel mostra a próxima etapa do draft.';
     } else if (action.kind === 'start') {
       if (!interaction.isButton()) throw new BotError('Controle de início inválido.');
-      requireInitiator(actor!, match, config);
+      if (!match.players.some(player => player.isCaptain && player.discordId === id)) requireStaff(actor!, config);
       if (match.status !== 'ready') throw new BotError('A partida ainda não está pronta ou já começou. Confira o painel atualizado.');
       await service.startMatch(match.id, id);
       confirmation = `Partida ao vivo. Ao terminar, informe o resultado com /finalizar partida:${match.id} vencedor:A ou vencedor:B.`;
@@ -274,13 +313,14 @@ export function createInteractionHandler(deps: HandlerDependencies): (interactio
       if (interaction.isChatInputCommand()) await command(interaction);
       else await component(interaction);
     } catch (error) {
+      if (!(error instanceof BotError || error instanceof DomainError)) report(`Erro inesperado em uma interação.${errorDetail(error)}`);
       const fallback = interaction.isChatInputCommand() ? commandErrors[interaction.commandName] : undefined;
       const payload = { content: '', embeds: [baseEmbed('NÃO FOI POSSÍVEL CONCLUIR', safeError(error, fallback))], components: [], allowedMentions: NO_MENTIONS };
       try {
         if (interaction.deferred || interaction.replied) await interaction.editReply(payload);
         else await interaction.reply({ ...payload, flags: MessageFlags.Ephemeral });
-      } catch {
-        report('Não foi possível responder a uma interação. Nenhum detalhe sensível foi publicado.');
+      } catch (replyError) {
+        report(`Não foi possível responder a uma interação.${errorDetail(replyError)}`);
       }
     }
   };

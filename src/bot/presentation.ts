@@ -62,28 +62,26 @@ export function queuePresentation(queue: QueueState, siteUrl?: string): PanelPay
     return visible.join('\n') || 'Nenhum jogador nesta posição.';
   };
   const embed = baseEmbed('FILA 6v6', [
-    queue.ready ? '**Fila pronta.** A staff pode formar a próxima partida com /iniciar.' : '**Seu próximo jogo começa aqui.** Aguardando a composição completa.',
-    `**${queue.players.length} na fila** · Spikers **${queue.spikers}/8** · Setters **${queue.setters}/4**`,
+    queue.ready ? '**Fila pronta.** A staff pode formar a próxima partida com /iniciar.' : '**Seu próximo jogo começa aqui.** Aguardando 12 jogadores.',
+    `**${queue.players.length}/12 na fila** · Spikers **${queue.spikers}** · Setters **${queue.setters}**`,
     '',
     'Primeira vez? Use **/register roblox:seu_usuario posicao:spiker**, coloque o código na descrição Roblox e execute **/verificar**.',
-    'Entre com **/fila** ou escolha sua posição abaixo. Use **/sair**, **/posicao**, **/profile** e **/ranking** quando precisar.',
-    'A engine seleciona os mais antigos por posição. Cada equipe recebe 4 spikers e 2 setters.',
+    'Clique em **Entrar na fila** e escolha sua posição de prioridade. Com **12 jogadores** a partida começa sozinha. Use **/profile** e **/ranking** quando precisar.',
+    'Cada equipe tem 4 spikers e 2 setters, e os mais antigos de cada posição entram primeiro. Se faltar uma posição, os últimos a entrar da outra tomam **autofill**: ganham o dobro de Elo na vitória e perdem só metade na derrota.',
   ].join('\n')).addFields(
     { name: `SPIKERS · ${queue.spikers}`, value: positions('spiker'), inline: true },
     { name: `SETTERS · ${queue.setters}`, value: positions('setter'), inline: true },
   );
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId('mm:q:spiker').setLabel('Entrar como spiker').setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId('mm:q:setter').setLabel('Entrar como setter').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId('mm:q:join').setLabel('Entrar na fila').setStyle(ButtonStyle.Danger).setDisabled(queue.players.length >= 12),
     new ButtonBuilder().setCustomId('mm:q:leave').setLabel('Sair da fila').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('mm:q:status').setLabel('Ver fila').setStyle(ButtonStyle.Secondary),
   );
   return { content: '', embeds: [embed], components: [row, ...siteRow(siteUrl)], allowedMentions: NO_MENTIONS };
 }
 
 function playerLine(player: MatchPlayer): string {
   const captain = player.isCaptain ? ' [C]' : '';
-  const vip = player.vip !== 'none' ? ` · ${vipNames[player.vip]}` : '';
+  const vip = (player.vip !== 'none' ? ` · ${vipNames[player.vip]}` : '') + (player.autofill ? ' · Autofill (2x Elo)' : '');
   const delta = player.eloDelta === null ? '' : ` · ${player.eloDelta >= 0 ? '+' : ''}${player.eloDelta}`;
   return `**${text(player.robloxName, 20)}**${captain}${vip}\n${player.position === 'spiker' ? 'Spiker' : 'Setter'} · ${rankNamePt(rankFor(player.elo).rank.name)} · ${player.elo} Elo${delta}`;
 }
@@ -94,10 +92,10 @@ export function draftCandidates(match: Match): MatchPlayer[] {
   return match.players.filter(player => player.team === null && team.filter(member => member.position === player.position).length < (player.position === 'spiker' ? 4 : 2));
 }
 
-export function captainCandidates(match: Match, team: Team): MatchPlayer[] {
+/** Candidatos a capitão: todos no modo capitães (team null), ou os jogadores do time nos outros modos. */
+export function captainCandidates(match: Match, team: Team | null): MatchPlayer[] {
   if (match.status !== 'captains') return [];
-  const other = match.players.find(player => player.isCaptain && player.team !== team);
-  return match.players.filter(player => player.discordId !== other?.discordId);
+  return match.players.filter(player => team === null || player.team === team);
 }
 
 export function matchPresentation(match: Match, siteUrl?: string, interactive = true): PanelPayload {
@@ -112,17 +110,16 @@ export function matchPresentation(match: Match, siteUrl?: string, interactive = 
         .setLabel(`${modeNames[mode]} · ${match.votes[mode]}`).setStyle(mode === 'balanced' ? ButtonStyle.Danger : ButtonStyle.Secondary).setDisabled(!interactive)),
     ));
   } else if (match.status === 'captains') {
-    const captainOf = (team: Team) => match.players.find(player => player.isCaptain && player.team === team);
-    const label = (team: Team) => { const captain = captainOf(team); return captain ? `**${text(captain.robloxName, 20)}**` : 'aguardando a staff'; };
-    description.push('', '**A staff escolhe os capitães.** Selecione um capitão para o **Time A** e outro para o **Time B** nos menus abaixo.',
-      `Capitão do Time A: ${label('A')} · Capitão do Time B: ${label('B')}`,
-      'Assim que os dois estiverem definidos, o draft começa. O primeiro pick é sorteado: 50% de chance para cada time. Cada pick tem 45s; sem escolha, o jogador é sorteado.');
-    for (const team of ['A', 'B'] as const) {
-      const chosen = captainOf(team);
+    const teams = match.mode === 'captains' ? [null] : (['A', 'B'] as const);
+    description.push('', match.mode === 'captains'
+      ? '**Vote no capitão.** Os 2 mais votados viram capitães e montam os times no draft.'
+      : '**Vote no capitão do seu time.** O mais votado de cada time vira capitão.',
+      `Votação até ${relativeTime(match.captainDeadline ?? null)}. Sem voto, o capitão é sorteado. Os capitães iniciam o jogo e mandam o link do servidor aqui.`);
+    for (const team of teams) {
       components.push(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
-        new StringSelectMenuBuilder().setCustomId(`mm:m:${match.id}:cap:${team}`).setPlaceholder(chosen ? `Capitão do Time ${team}: ${plain(chosen.robloxName, 40)} · trocar` : `Staff: escolha o capitão do Time ${team}`)
+        new StringSelectMenuBuilder().setCustomId(`mm:m:${match.id}:cap:${team ?? 'A'}`).setPlaceholder(team ? `Time ${team}: vote no capitão` : 'Vote no capitão')
           .setMinValues(1).setMaxValues(1).setDisabled(!interactive).addOptions(captainCandidates(match, team).map(player => ({
-            label: plain(player.robloxName, 40), value: player.discordId, default: chosen?.discordId === player.discordId,
+            label: plain(player.robloxName, 40), value: player.discordId,
             description: `${player.position === 'spiker' ? 'Spiker' : 'Setter'} · ${player.elo} Elo · ${rankNamePt(rankFor(player.elo).rank.name)}`,
           }))),
       ));
@@ -141,11 +138,18 @@ export function matchPresentation(match: Match, siteUrl?: string, interactive = 
         }))),
     ));
   } else if (match.status === 'ready') {
-    description.push('', 'Equipes definidas. Somente o iniciador, ainda autorizado como staff, pode colocar a partida ao vivo.');
+    const captains = match.players.filter(player => player.isCaptain).map(player => `**${text(player.robloxName, 20)}**`).join(' e ');
+    description.push('', `Equipes definidas. Capitães: ${captains || '—'}. Um capitão manda o link do servidor aqui e clica em **Iniciar jogo**.`);
     components.push(new ActionRowBuilder<ButtonBuilder>().addComponents(new ButtonBuilder().setCustomId(`mm:m:${match.id}:start`)
-      .setLabel('Iniciar jogo · somente iniciador').setStyle(ButtonStyle.Danger).setDisabled(!interactive)));
+      .setLabel('Iniciar jogo · capitães').setStyle(ButtonStyle.Danger).setDisabled(!interactive)));
   } else if (match.status === 'live') {
-    description.push('', `Iniciada ${relativeTime(match.startedAt)}. Bom jogo!`, `Ao terminar, o iniciador deve usar **/finalizar partida:${match.id} vencedor:A** ou **vencedor:B**.`, 'O resultado abre 60 segundos de votação de MVP antes do fechamento de Elo.');
+    const reports = match.resultReports ?? {};
+    const reported = (team: Team) => reports[team] ? `Equipe ${reports[team]}` : 'aguardando';
+    description.push('', `Iniciada ${relativeTime(match.startedAt)}. Bom jogo!`,
+      'Ao terminar, **os dois capitães** marcam o vencedor nos botões abaixo. Se discordarem, um Match Organizer usa **/finalizar**.',
+      `Capitão A: ${reported('A')} · Capitão B: ${reported('B')}`, 'O resultado abre 60 segundos de votação de MVP antes do fechamento de Elo.');
+    components.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
+      ...(['A', 'B'] as const).map(team => new ButtonBuilder().setCustomId(`mm:m:${match.id}:win:${team}`).setLabel(`Equipe ${team} venceu`).setStyle(ButtonStyle.Primary).setDisabled(!interactive))));
   } else if (match.status === 'mvp') {
     description.push('', `Vitória da **Equipe ${match.winner}**. Vote no destaque até ${relativeTime(match.mvpDeadline)}. **${match.mvpVoters}/12** votos.`,
       'Um candidato de qualquer equipe. Não é permitido votar em si mesmo. Zero votos: sem MVP. Empates são resolvidos pela engine.');
@@ -177,4 +181,27 @@ export function matchPresentation(match: Match, siteUrl?: string, interactive = 
   }
   embed.addFields({ name: 'COMPOSIÇÃO', value: `${match.players.length}/12 jogadores · ${match.players.filter(player => player.position === 'spiker').length} spikers + ${match.players.filter(player => player.position === 'setter').length} setters\nPor equipe: 4 spikers (S) + 2 setters (L). Capitão: [C].` });
   return { content: '', embeds: [embed], components: [...components, ...siteRow(siteUrl)], allowedMentions: NO_MENTIONS };
+}
+
+/** Resposta privada ao clicar em Entrar na fila: a pessoa escolhe a posição de prioridade. */
+export function rolePrompt(): PanelPayload {
+  return {
+    content: '', allowedMentions: NO_MENTIONS,
+    embeds: [baseEmbed('ESCOLHA SUA POSIÇÃO', 'Qual posição você prefere jogar? Se faltar gente na outra posição, você pode tomar **autofill**: ganha o dobro de Elo na vitória e perde só metade na derrota.')],
+    components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId('mm:q:spiker').setLabel('Spiker').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId('mm:q:setter').setLabel('Setter').setStyle(ButtonStyle.Danger),
+    )],
+  };
+}
+
+/** Mensagem fixa do canal host: só o Match Organizer abre a fila. */
+export function hostPanel(): PanelPayload {
+  return {
+    content: '', allowedMentions: NO_MENTIONS,
+    embeds: [baseEmbed('PAINEL DO MATCH ORGANIZER', 'Somente quem tem o cargo **Match Organizer** pode abrir a fila. O painel da fila aparece logo abaixo; com 12 jogadores a partida é criada sozinha, com sala e calls privadas.')],
+    components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId('mm:q:open').setLabel('Abrir fila').setStyle(ButtonStyle.Success),
+    )],
+  };
 }

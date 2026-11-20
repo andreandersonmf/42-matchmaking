@@ -51,23 +51,6 @@ test('DM e guild externa são rejeitadas antes de qualquer chamada ao serviço',
   assert.equal(calls, 0);
 });
 
-test('finalizar: dono não substitui iniciador e iniciador sem staff é rejeitado', async () => {
-  let finishes = 0;
-  const current = match({ status: 'live' });
-  const overrides = { getMatch: async () => current, finishMatch: async () => { finishes++; return current; } };
-  for (const actor of [{ ...staff, roles: [] }, { id: config.ownerId, roles: [], permissions: 0n }, { ...staff, id: playerId(5) }]) {
-    const request = interaction('command', 'finalizar', actor.id, { partida: 42, vencedor: 'A' });
-    await handler(overrides, actor).run(request.event);
-    assert.match(request.body(), /staff|Somente o membro/);
-  }
-  assert.equal(finishes, 0);
-  const request = interaction('command', 'finalizar', initiatorId, { partida: 42, vencedor: 'B' });
-  await handler({ ...overrides, finishMatch: async (id, actor, winner) => { assert.deepEqual([id, actor, winner], [42, initiatorId, 'B']); finishes++; return current; } }).run(request.event);
-  assert.equal(finishes, 1);
-  assert.equal(request.deferred[0].flags, MessageFlags.Ephemeral);
-  assert.match(request.body(), /60 segundos/);
-});
-
 test('resultado só é aceito ao vivo e equipe precisa ser A ou B', async () => {
   let calls = 0;
   for (const status of ['voting', 'ready', 'mvp', 'completed', 'cancelled'] as const) {
@@ -93,9 +76,6 @@ test('botão iniciar verifica autor atual, staff, status e mensagem persistida',
   await ctx.run(correct.event);
   assert.equal(calls, 1);
   assert.match(correct.body(), /Partida ao vivo/);
-  const owner = interaction('button', 'mm:m:42:start', config.ownerId);
-  await handler({ getMatch: async () => current }, { id: config.ownerId, roles: [], permissions: 0n }).run(owner.event);
-  assert.match(owner.body(), /Somente o membro/);
 });
 
 test('VIP aceita cargo staff; ajuste Elo é exclusivo do dono e encaminha auditoria', async () => {
@@ -239,47 +219,38 @@ test('criação chama engine uma vez, publica e anexa sem regras locais', async 
   assert.equal(created, 1);
   assert.equal(ctx.transport.sent.length, 1);
   assert.ok(current.messageId);
-  assert.match(request.body(), /30 segundos/);
+  assert.match(request.body(), /formada/);
 });
 
-test('capitães: só a staff iniciadora escolhe, um por time, e o painel precisa ser o atual', async () => {
+test('capitães: os 12 jogadores votam pelo painel atual; capitão pode iniciar sem a staff', async () => {
   const current = match({ status: 'captains', mode: 'captains' });
-  current.players[6].team = 'B'; current.players[6].isCaptain = true;
   const calls: unknown[][] = [];
-  const started = match({ status: 'drafting', mode: 'captains', firstPick: 'B', draftTurn: 'B' });
-  const ctx = handler({ getMatch: async () => current, setCaptain: async (...args) => { calls.push(args); return started; } });
+  const ctx = handler({ getMatch: async () => current, voteCaptain: async (...args) => { calls.push(args); return current; } });
 
-  const owner = interaction('select', 'mm:m:42:cap:A', config.ownerId); owner.value.values = [playerId(3)];
-  await handler({ getMatch: async () => current }, { id: config.ownerId, roles: [], permissions: 0n }).run(owner.event);
-  assert.match(owner.body(), /Somente o membro da staff/);
-  const player3 = interaction('select', 'mm:m:42:cap:A', playerId(3)); player3.value.values = [playerId(3)];
-  await handler({ getMatch: async () => current }, { id: playerId(3), roles: [], permissions: 0n }).run(player3.event);
-  assert.match(player3.body(), /exclusiva da staff/);
-  const stale = interaction('select', 'mm:m:42:cap:A', initiatorId); stale.value.values = [playerId(3)]; stale.value.message.id = 'other';
+  const outsider = interaction('select', 'mm:m:42:cap:A', config.ownerId); outsider.value.values = [playerId(3)];
+  await ctx.run(outsider.event);
+  assert.match(outsider.body(), /Somente os 12 jogadores/);
+  const stale = interaction('select', 'mm:m:42:cap:A', playerId(1)); stale.value.values = [playerId(3)]; stale.value.message.id = 'other';
   await ctx.run(stale.event);
   assert.match(stale.body(), /substituído/);
-  const button = interaction('button', 'mm:m:42:cap:A', initiatorId);
+  const button = interaction('button', 'mm:m:42:cap:A', playerId(1));
   await ctx.run(button.event);
   assert.match(button.body(), /Controle de capitão inválido/);
-  const other = interaction('select', 'mm:m:42:cap:A', initiatorId); other.value.values = [playerId(6)];
-  await ctx.run(other.event);
-  assert.match(other.body(), /não pode ser capitão/);
   assert.equal(calls.length, 0);
 
-  const valid = interaction('select', 'mm:m:42:cap:A', initiatorId); valid.value.values = [playerId(3)];
+  const valid = interaction('select', 'mm:m:42:cap:A', playerId(1)); valid.value.values = [playerId(3)];
   await ctx.run(valid.event);
-  assert.deepEqual(calls, [[42, initiatorId, 'A', playerId(3)]]);
-  assert.match(valid.body(), /Capitão do Time A definido/);
-  assert.match(valid.body(), /draft começou/);
-  assert.match(valid.body(), /primeiro pick ficou com a \*\*Equipe B\*\*/);
+  assert.deepEqual(calls, [[42, playerId(1), playerId(3)]]);
+  assert.match(valid.body(), /voto de capitão foi registrado/);
 
-  const partial = match({ status: 'captains', mode: 'captains' });
-  const waiting = handler({ getMatch: async () => partial, setCaptain: async () => partial });
-  const first = interaction('select', 'mm:m:42:cap:B', initiatorId); first.value.values = [playerId(3)];
-  await waiting.run(first.event);
-  assert.match(first.body(), /Falta escolher o capitão do outro time/);
+  const late = interaction('select', 'mm:m:42:cap:A', playerId(1)); late.value.values = [playerId(3)];
+  await handler({ getMatch: async () => match({ status: 'drafting', mode: 'captains', draftTurn: 'A' }) }).run(late.event);
+  assert.match(late.body(), /já terminou/);
 
-  const notYet = interaction('select', 'mm:m:42:cap:A', initiatorId); notYet.value.values = [playerId(3)];
-  await handler({ getMatch: async () => match({ status: 'drafting', mode: 'captains', draftTurn: 'A' }) }).run(notYet.event);
-  assert.match(notYet.body(), /já foi concluída/);
+  const ready = match({ status: 'ready' });
+  ready.players[2].team = 'A'; ready.players[2].isCaptain = true;
+  const started: unknown[][] = [];
+  const captain = interaction('button', 'mm:m:42:start', playerId(2));
+  await handler({ getMatch: async () => ready, startMatch: async (...args) => { started.push(args); return ready; } }, { id: playerId(2), roles: [], permissions: 0n }).run(captain.event);
+  assert.deepEqual(started, [[42, playerId(2)]]);
 });

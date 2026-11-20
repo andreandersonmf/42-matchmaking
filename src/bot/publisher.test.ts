@@ -202,7 +202,7 @@ test('fila publicada é atualizada sem duplicar e não recebe edits sem mudança
   await publisher.refreshQueues();
   assert.equal(transport.edited.length, edits + 1);
   assert.equal(transport.sent.length, 1);
-  assert.match(transport.edited.at(-1)!.payload.embeds[0].data.description!, /1\/8/);
+  assert.match(transport.edited.at(-1)!.payload.embeds[0].data.description!, /Spikers \*\*1\*\*/);
 });
 
 test('executor libera a fila após erro', async () => {

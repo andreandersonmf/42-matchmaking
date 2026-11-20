@@ -33,7 +33,8 @@ async function populateDemo(service: MatchmakingService, setClock: (time: number
     for (let index = 0; index < 4; index++) await service.joinQueue(setters[(index + offset * 3) % setters.length].discordId);
   };
   const resolve = async (match: Match, mode: MatchMode) => {
-    for (const player of match.players) match = await service.voteMode(match.id, player.discordId, mode);
+    if (match.status === 'voting') for (const player of match.players) match = await service.voteMode(match.id, player.discordId, mode);
+    if (match.status === 'captains' && match.mode !== 'captains') for (const player of match.players) match = await service.voteCaptain(match.id, player.discordId, player.discordId);
     if (match.status === 'captains') {
       // a staff (dona da demonstração) escolhe os dois maiores Elos como capitães
       const [first, second] = [...match.players].sort((a, b) => b.elo - a.elo || a.discordId.localeCompare(b.discordId));

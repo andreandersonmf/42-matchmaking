@@ -1,14 +1,16 @@
 import 'dotenv/config';
 import { pathToFileURL } from 'node:url';
-import { Client, Events, GatewayIntentBits } from 'discord.js';
+import { ChannelType, Client, Events, GatewayIntentBits, type TextChannel } from 'discord.js';
 import type { Match, ServiceContract } from '../core/types.js';
 import { AvatarSync } from './avatars.js';
 import { readBotEnvironment } from './env.js';
 import { actorResolver, createInteractionHandler } from './handler.js';
-import { NO_MENTIONS } from './presentation.js';
+import { hostPanel, NO_MENTIONS } from './presentation.js';
 import { DiscordTransport, Lifecycle, Publisher } from './publisher.js';
 import { syncAllEloRoles, syncEloRoles } from './roles.js';
 import { publishVerifyGuide, verificationApplier } from './verify.js';
+import { callSyncer, QUEUE_CALL, syncCalls } from './voice.js';
+import { errorDetail } from './access.js';
 
 export async function startBot(): Promise<(() => void) | undefined> {
   if (process.env.NODE_ENV === 'test' || process.env.NODE_TEST_CONTEXT) return undefined;
@@ -28,7 +30,7 @@ export async function startBot(): Promise<(() => void) | undefined> {
   const runtime = await import('../core/runtime.js');
   const service: ServiceContract = runtime.service;
   const avatars = new AvatarSync(runtime.service);
-  const client = new Client({ intents: [GatewayIntentBits.Guilds], allowedMentions: NO_MENTIONS });
+  const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates], allowedMentions: NO_MENTIONS });
   const transport = new DiscordTransport(client, config);
   const publisher = new Publisher(service, transport, config);
   const syncRoles = async (userId: string, elo: number): Promise<string | undefined> => {
@@ -54,9 +56,25 @@ export async function startBot(): Promise<(() => void) | undefined> {
       }
     }
   };
+  /** Garante a mensagem fixa do Match Organizer no canal host e reaproveita o painel de fila que já estiver lá. */
+  const ensureHostPanel = async () => {
+    const guild = await client.guilds.fetch(config.guildId);
+    const host = (await guild.channels.fetch()).find(c => c?.type === ChannelType.GuildText && c.name.toLowerCase().includes('host')) as TextChannel | undefined;
+    if (!host) { console.warn('Canal host não encontrado; o painel do Match Organizer não foi publicado.'); return; }
+    const mine = (await host.messages.fetch({ limit: 50 })).filter(message => message.author.id === client.user?.id);
+    const withButton = (id: string) => mine.find(message => message.components.some(row => 'components' in row
+      && row.components.some(component => (component as { customId?: string | null }).customId === id)));
+    if (!withButton('mm:q:open')) await host.send(hostPanel());
+    const panel = withButton('mm:q:join');
+    if (panel) publisher.adoptPanel(host.id, panel.id);
+  };
   const lifecycle = new Lifecycle(service, publisher, console.warn, afterTick);
   const handler = createInteractionHandler({ service, config, publisher, transport, resolveActor: actorResolver(client, config), applyVerification: verificationApplier(client, config), syncRoles, refreshAvatar: id => avatars.refresh(id) });
-  const stop = () => { lifecycle.stop(); avatars.stop(); client.destroy(); };
+  const syncVoice = callSyncer(async () => syncCalls(await client.guilds.fetch(config.guildId), service, config.staffRoleId, console.warn));
+  const runVoice = () => { void syncVoice().catch(error => console.warn(`Não foi possível sincronizar as calls das partidas.${errorDetail(error)}`)); };
+  let voiceTimer: ReturnType<typeof setInterval> | undefined;
+  const stop = () => { lifecycle.stop(); avatars.stop(); clearInterval(voiceTimer); client.destroy(); };
+  client.on(Events.VoiceStateUpdate, (_, state) => { if (state.guild.id === config.guildId && state.channel?.name.toLowerCase() === QUEUE_CALL) runVoice(); });
   client.on(Events.Error, () => console.warn('O cliente Discord encontrou uma falha de conexão.'));
   client.on(Events.ShardError, () => console.warn('A conexão com o Discord foi interrompida.'));
   client.on(Events.InteractionCreate, interaction => { void handler(interaction).catch(() => console.warn('Não foi possível processar uma interação.')); });
@@ -70,13 +88,16 @@ export async function startBot(): Promise<(() => void) | undefined> {
     console.info('4.2 Matchmaking conectado. Recuperando partidas e prazos persistidos.');
     void lifecycle.start().catch(() => console.warn('Não foi possível recuperar as mensagens de partidas.'));
     avatars.start();
+    runVoice();
+    void ensureHostPanel().catch(error => console.warn(`Não foi possível publicar o painel do Match Organizer no canal host.${errorDetail(error)}`));
+    voiceTimer = setInterval(runVoice, 3_000);
     if (config.verifyChannelId) {
       void publishVerifyGuide(client, config.verifyChannelId, config.guildId)
         .catch(() => console.warn('Não foi possível publicar o guia de verificação no canal #verify.'));
     }
     client.guilds.fetch(config.guildId)
       .then(guild => syncAllEloRoles(service, guild, console.warn))
-      .catch(() => console.warn('Não foi possível sincronizar os cargos de Elo na inicialização.'));
+      .catch(error => console.warn(`Não foi possível sincronizar os cargos de Elo na inicialização.${errorDetail(error)}`));
   });
   try {
     await client.login(config.token);

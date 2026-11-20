@@ -45,10 +45,10 @@ test('modo somente leitura desabilita controles; equipes prontas têm botão res
   }
   const ready = matchPresentation(match({ status: 'ready' }));
   const button = ready.components[0].toJSON().components[0];
-  assert.ok('label' in button && button.label?.includes('somente iniciador'));
+  assert.ok('label' in button && button.label?.includes('capitães'));
   assert.equal(matchPresentation(match({ status: 'completed' })).components.length, 0);
   assert.equal(matchPresentation(match({ status: 'cancelled' })).components.length, 0);
-  assert.match(matchPresentation(match({ status: 'live' })).embeds[0].data.description!, /\/finalizar partida:42/);
+  assert.match(matchPresentation(match({ status: 'live' })).embeds[0].data.description!, /\/finalizar/);
 });
 
 test('draft respeita limite por posição e não inclui jogadores já escolhidos', () => {
@@ -64,37 +64,36 @@ test('draft respeita limite por posição e não inclui jogadores já escolhidos
 test('fila usa dados atuais, onboarding real, sem menções nem links injetados', () => {
   const queue = { players: Array.from({ length: 24 }, (_, i) => ({ ...player(i), queuedAt: i })), spikers: 16, setters: 8, ready: true };
   const payload = queuePresentation(queue, 'javascript:alert(1)');
-  assert.match(payload.embeds[0].data.description!, /24 na fila/);
-  for (const command of ['/register', '/verificar', '/fila', '/sair', '/posicao', '/profile', '/ranking']) assert.ok(payload.embeds[0].data.description!.includes(command));
+  assert.match(payload.embeds[0].data.description!, /24\/12 na fila/);
+  for (const command of ['/register', '/verificar', '/profile', '/ranking']) assert.ok(payload.embeds[0].data.description!.includes(command));
   assert.equal(payload.components.length, 1);
   assert.deepEqual(payload.allowedMentions, { parse: [], repliedUser: false });
-  assert.equal(payload.components[0].components.length, 4);
+  assert.equal(payload.components[0].components.length, 2);
   assert.doesNotMatch(text('@everyone **x**'), /@everyone/);
   assert.ok(text('@everyone **x**').includes('\\*'));
 });
 
-test('etapa de capitães: staff escolhe um capitão por time em dois menus com os 12 jogadores', () => {
-  const stage = match({ status: 'captains', mode: 'captains' });
+test('etapa de capitães: modo capitães tem 1 menu de voto com os 12 jogadores', () => {
+  const stage = match({ status: 'captains', mode: 'captains', captainDeadline: 1_800_000_060_000 });
   const payload = matchPresentation(stage, 'https://example.com');
   const description = payload.embeds[0].data.description!;
   assert.match(description, /ESCOLHA DOS CAPITÃES/);
-  assert.match(description, /staff escolhe os capitães/);
-  assert.match(description, /50%/);
-  const menus = payload.components.slice(0, 2).map(row => row.toJSON().components[0]);
-  assert.deepEqual(menus.map(menu => 'custom_id' in menu ? menu.custom_id : ''), ['mm:m:42:cap:A', 'mm:m:42:cap:B']);
-  for (const menu of menus) assert.ok('options' in menu && menu.options.length === 12 && menu.max_values === 1 && menu.min_values === 1);
-  assert.equal(payload.components.length, 3);
-  for (const row of payload.components) assert.doesNotThrow(() => row.toJSON());
+  assert.match(description, /Vote no capitão/);
+  const menu = payload.components[0].toJSON().components[0];
+  assert.ok('custom_id' in menu && menu.custom_id === 'mm:m:42:cap:A');
+  assert.ok('options' in menu && menu.options.length === 12 && menu.max_values === 1 && menu.min_values === 1);
+  assert.equal(payload.components.length, 2);
   for (const row of matchPresentation(stage, undefined, false).components) for (const component of row.toJSON().components) assert.equal(component.disabled, true);
 });
 
-test('capitão já escolhido sai do menu do outro time e aparece no painel', () => {
-  const stage = match({ status: 'captains', mode: 'captains' });
-  stage.players[0].team = 'A'; stage.players[0].isCaptain = true;
-  assert.equal(captainCandidates(stage, 'B').some(p => p.discordId === playerId(0)), false);
-  assert.equal(captainCandidates(stage, 'B').length, 11);
-  assert.equal(captainCandidates(stage, 'A').length, 12);
-  assert.match(matchPresentation(stage).embeds[0].data.description!, /Capitão do Time A: \*\*Roblox\\_0\*\*/);
+test('etapa de capitães nos outros modos: 1 menu por time só com os jogadores do time', () => {
+  const stage = match({ status: 'captains', mode: 'balanced' });
+  stage.players.forEach((p, i) => { p.team = i % 2 ? 'B' : 'A'; });
+  assert.equal(captainCandidates(stage, 'A').length, 6);
+  assert.ok(captainCandidates(stage, 'A').every(p => p.team === 'A'));
+  assert.equal(captainCandidates(stage, null).length, 12);
+  const ids = matchPresentation(stage).components.slice(0, 2).map(row => { const c = row.toJSON().components[0]; return 'custom_id' in c ? c.custom_id : ''; });
+  assert.deepEqual(ids, ['mm:m:42:cap:A', 'mm:m:42:cap:B']);
   assert.deepEqual(captainCandidates(match({ status: 'voting' }), 'A'), []);
 });
 

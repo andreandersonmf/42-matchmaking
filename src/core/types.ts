@@ -42,6 +42,8 @@ export interface MatchPlayer {
   robloxId: string;
   robloxName: string;
   position: Position;
+  /** Jogou fora da posição escolhida na fila. Ausente em partidas antigas. */
+  autofill?: boolean;
   elo: number;
   vip: VipTier;
   team: Team | null;
@@ -72,6 +74,12 @@ export interface Match {
   mvpId: string | null;
   channelId: string | null;
   messageId: string | null;
+  /** Prazo da votação de capitão. Ausente em partidas antigas. */
+  captainDeadline?: number | null;
+  /** Canal público onde a partida foi criada; recebe o resultado quando o painel vai para a sala privada. */
+  resultChannelId?: string | null;
+  /** Vencedor informado pelo capitão de cada time. */
+  resultReports?: Partial<Record<Team, Team>>;
 }
 
 export interface QueueEntry extends Player { queuedAt: number }
@@ -141,6 +149,9 @@ export interface ServiceContract {
   attachMessage(id: number, channelId: string, messageId: string): Promise<void>;
   voteMode(id: number, discordId: string, mode: MatchMode): Promise<Match>;
   setCaptain(id: number, actorId: string, team: Team, playerId: string): Promise<Match>;
+  voteCaptain(id: number, voterId: string, candidateId: string): Promise<Match>;
+  reportResult(id: number, captainId: string, winner: Team): Promise<Match>;
+  moveToRoom(id: number, roomId: string): Promise<void>;
   pick(id: number, captainId: string, playerId: string): Promise<Match>;
   startMatch(id: number, actorId: string): Promise<Match>;
   finishMatch(id: number, actorId: string, winner: Team): Promise<Match>;

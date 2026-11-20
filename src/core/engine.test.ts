@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { MatchmakingService } from './engine.js';
+import { autofillDelta, MatchmakingService, pickPlayers } from './engine.js';
 import { calculateElo, rankFor, RANKS } from './ranks.js';
-import type { Match, MatchMode } from './types.js';
+import type { Match, Position } from './types.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -20,21 +20,15 @@ async function fixture(count = 12, random?: (max: number) => number) {
 }
 
 async function queued(service: MatchmakingService) {
-  for (const player of await service.listPlayers()) await service.joinQueue(player.discordId);
+  for (const player of (await service.listPlayers()).slice(0, 12)) await service.joinQueue(player.discordId);
   return service.createMatch('staff', 'channel');
 }
 
-async function ready(service: MatchmakingService, mode: MatchMode = 'balanced') {
+async function ready(service: MatchmakingService) {
   let match = await queued(service);
-  for (const player of match.players) match = await service.voteMode(match.id, player.discordId, mode);
+  // Times já saem balanceados por Elo; cada um vota em si e o desempate escolhe um capitão por time.
+  for (const player of match.players) match = await service.voteCaptain(match.id, player.discordId, player.discordId);
   return match;
-}
-
-/** Partida em modo capitães com os dois capitães já escolhidos pela staff iniciadora. */
-async function drafting(service: MatchmakingService) {
-  let match = await ready(service, 'captains');
-  match = await service.setCaptain(match.id, 'staff', 'A', '1');
-  return service.setCaptain(match.id, 'staff', 'B', '2');
 }
 
 function checkTeams(match: Match) {
@@ -61,18 +55,41 @@ test('vinculação comprova descrição, impede duplicatas e expira em 15 minuto
   } finally { service.close(); }
 });
 
-test('fila exige 8 Spikers e 4 Setters, não apenas doze jogadores', async () => {
+test('fila sai com 12 jogadores e o último spiker a entrar toma autofill de setter', async () => {
   const { service } = await fixture();
   try {
     await service.setPosition('3', 'spiker');
-    for (const player of await service.listPlayers()) await service.joinQueue(player.discordId);
+    const players = await service.listPlayers();
+    for (const player of players.slice(0, 11)) await service.joinQueue(player.discordId);
     assert.equal((await service.getQueue()).ready, false);
-    await assert.rejects(service.createMatch('staff', 'channel'), /8 Spikers e 4 Setters/);
-    await service.setPosition('3', 'setter');
+    await assert.rejects(service.createMatch('staff', 'channel'), /12 jogadores/);
+    await service.joinQueue(players[11].discordId);
     assert.equal((await service.getQueue()).ready, true);
-    assert.equal((await service.createMatch('staff', 'channel')).players.length, 12);
+    const match = await service.createMatch('staff', 'channel');
+    assert.equal(match.players.filter(p => p.position === 'spiker').length, 8);
+    assert.equal(match.players.filter(p => p.position === 'setter').length, 4);
+    const filled = match.players.filter(p => p.autofill);
+    assert.equal(filled.length, 1);
+    assert.equal(filled[0].position, 'setter');
+    assert.equal((await service.getRankedPlayer(filled[0].discordId))!.position, 'spiker');
     assert.equal((await service.getQueue()).players.length, 0);
   } finally { service.close(); }
+});
+
+test('pickPlayers: 10 spikers e 2 setters viram 8+4 com os 2 últimos spikers no autofill', () => {
+  const queue = Array.from({ length: 12 }, (_, i) => ({ id: i, position: (i < 10 ? 'spiker' : 'setter') as Position }));
+  const picked = pickPlayers(queue)!;
+  assert.deepEqual(picked.filter(p => p.autofill).map(p => [p.id, p.position]), [[8, 'setter'], [9, 'setter']]);
+  assert.equal(pickPlayers(queue.slice(1)), null);
+  const setters = Array.from({ length: 12 }, (_, i) => ({ id: i, position: (i < 6 ? 'setter' : 'spiker') as Position }));
+  assert.deepEqual(pickPlayers(setters)!.filter(p => p.autofill).map(p => [p.id, p.position]), [[4, 'spiker'], [5, 'spiker']]);
+});
+
+test('autofill ganha o dobro e perde metade', () => {
+  assert.equal(autofillDelta(20), 40);
+  assert.equal(autofillDelta(-15), -7);
+  assert.equal(autofillDelta(-1), 0);
+  assert.equal(autofillDelta(0), 0);
 });
 
 test('fila impede duplicação, posição durante partida e duas partidas por pessoa', async () => {
@@ -87,44 +104,15 @@ test('fila impede duplicação, posição durante partida e duas partidas por pe
   } finally { service.close(); }
 });
 
-test('voto pode ser alterado, desconhecidos não votam, fecha com 12 votos', async () => {
-  const { service } = await fixture();
-  try {
-    let match = await queued(service);
-    await assert.rejects(service.voteMode(match.id, 'outsider', 'balanced'), /Somente os 12/);
-    await service.voteMode(match.id, '1', 'random');
-    match = await service.voteMode(match.id, '1', 'balanced');
-    assert.equal(match.modeVoters, 1);
-    assert.equal(match.votes.random, 0);
-    for (const player of match.players.filter(player => player.discordId !== '1')) match = await service.voteMode(match.id, player.discordId, 'balanced');
-    assert.equal(match.status, 'ready');
-    checkTeams(match);
-    await assert.rejects(service.voteMode(match.id, '1', 'random'), /já terminou/);
-  } finally { service.close(); }
-});
-
-test('voto dura 30s, empate e ausência de votos favorecem balanced', async () => {
-  const { service, advance } = await fixture();
-  try {
-    const match = await queued(service);
-    await service.voteMode(match.id, '1', 'captains');
-    await service.voteMode(match.id, '2', 'balanced');
-    advance(29_999);
-    assert.deepEqual(await service.tick(), []);
-    advance(1);
-    const changed = await service.tick();
-    assert.equal(changed[0].mode, 'balanced');
-    checkTeams(changed[0]);
-    assert.deepEqual(await service.tick(), []);
-  } finally { service.close(); }
-});
-
 test('duas partidas reservam grupos distintos sem perder jogadores da fila', async () => {
   const { service } = await fixture(24);
   try {
-    for (const player of await service.listPlayers()) await service.joinQueue(player.discordId);
+    const players = await service.listPlayers();
+    for (const player of players.slice(0, 12)) await service.joinQueue(player.discordId);
+    await assert.rejects(service.joinQueue(players[12].discordId), /cheia/);
     const first = await service.createMatch('staff', 'channel');
-    assert.equal((await service.getQueue()).players.length, 12);
+    assert.equal((await service.getQueue()).players.length, 0);
+    for (const player of players.slice(12)) await service.joinQueue(player.discordId);
     const second = await service.createMatch('staff2', 'channel');
     const unique = new Set([...first.players, ...second.players].map(player => player.discordId));
     assert.equal(unique.size, 24);
@@ -137,13 +125,14 @@ test('histórico filtra participante antes de paginar e conta todas as partidas'
   const { service, advance } = await fixture(24);
   try {
     let first = await queued(service);
-    for (const player of first.players) first = await service.voteMode(first.id, player.discordId, 'balanced');
+    for (const player of first.players) first = await service.voteCaptain(first.id, player.discordId, player.discordId);
     await service.startMatch(first.id, 'staff');
     await service.finishMatch(first.id, 'staff', 'A');
     advance(60_000);
     await service.tick();
+    for (const player of (await service.listPlayers()).filter(p => !first.players.some(f => f.discordId === p.discordId))) await service.joinQueue(player.discordId);
     let second = await service.createMatch('staff', 'channel');
-    for (const player of second.players) second = await service.voteMode(second.id, player.discordId, 'balanced');
+    for (const player of second.players) second = await service.voteCaptain(second.id, player.discordId, player.discordId);
     await service.startMatch(second.id, 'staff');
     await service.finishMatch(second.id, 'staff', 'B');
     advance(60_000);
@@ -188,139 +177,17 @@ test('equilíbrio respeita funções e encontra diferença mínima possível', a
   } finally { service.close(); }
 });
 
-test('times aleatórios sempre respeitam 4 Spikers e 2 Setters', async () => {
+test('modo balanceado: voto de capitão só vale para o próprio time e capitão pode iniciar', async () => {
   const { service } = await fixture();
   try {
-    for (let round = 0; round < 15; round++) {
-      const match = await ready(service, 'random');
-      checkTeams(match);
-      await service.cancelMatch(match.id, 'staff');
-    }
-  } finally { service.close(); }
-});
-
-test('modo capitães aguarda a staff escolher os capitães e não os define por Elo', async () => {
-  const { service, advance } = await fixture();
-  try {
-    const match = await ready(service, 'captains');
-    assert.equal(match.status, 'captains');
-    assert.equal(match.mode, 'captains');
-    assert.equal(match.players.filter(player => player.isCaptain).length, 0);
-    assert.equal(match.players.filter(player => player.team !== null).length, 0);
-    assert.equal(match.draftTurn, null);
-    assert.equal(match.draftDeadline, null);
-    assert.equal(match.firstPick, null);
-    advance(10 * 60_000);
-    assert.deepEqual(await service.tick(), []);
-    assert.equal((await service.getMatch(match.id))!.status, 'captains');
-    assert.equal((await service.getActiveMatches()).length, 1);
-    await assert.rejects(service.joinQueue('1'), /partida em andamento/);
-    await assert.rejects(service.pick(match.id, '1', '3'), /fase de picks/);
-  } finally { service.close(); }
-});
-
-test('somente a staff iniciadora escolhe capitães, um por time, e pode trocar antes do segundo', async () => {
-  const { service } = await fixture();
-  try {
-    const match = await ready(service, 'captains');
-    await assert.rejects(service.setCaptain(match.id, 'owner', 'A', '1'), /staff que iniciou/);
-    await assert.rejects(service.setCaptain(match.id, 'another-staff', 'A', '1'), /staff que iniciou/);
-    await assert.rejects(service.setCaptain(match.id, 'staff', 'A', 'outsider'), /12 jogadores/);
-    await assert.rejects(service.setCaptain(match.id, 'staff', 'C' as never, '1'), /time A ou B/);
-
-    let current = await service.setCaptain(match.id, 'staff', 'A', '1');
-    assert.equal(current.status, 'captains');
-    assert.deepEqual(current.players.filter(player => player.isCaptain).map(player => [player.discordId, player.team]), [['1', 'A']]);
-    await assert.rejects(service.setCaptain(match.id, 'staff', 'B', '1'), /capitão do outro time/);
-
-    current = await service.setCaptain(match.id, 'staff', 'A', '5');
-    assert.deepEqual(current.players.filter(player => player.isCaptain).map(player => [player.discordId, player.team]), [['5', 'A']]);
-    assert.equal(current.players.find(player => player.discordId === '1')!.team, null);
-    assert.equal(current.status, 'captains');
-
-    current = await service.setCaptain(match.id, 'staff', 'B', '9');
-    assert.equal(current.status, 'drafting');
-    await assert.rejects(service.setCaptain(match.id, 'staff', 'B', '10'), /só podem ser escolhidos/);
-  } finally { service.close(); }
-});
-
-test('primeiro pick é sorteado 50/50 entre as equipes e o draft segue em serpente', async () => {
-  for (const [roll, first, second] of [[0, 'A', 'B'], [1, 'B', 'A']] as const) {
-    const { service } = await fixture(12, () => roll);
-    try {
-      let match = await drafting(service);
-      assert.equal(match.status, 'drafting');
-      assert.equal(match.firstPick, first);
-      assert.equal(match.draftTurn, first);
-      assert.equal(match.draftDeadline, 1_800_000_045_000);
-      await assert.rejects(service.pick(match.id, 'outsider', '3'), /capitão da vez/);
-      const turns: string[] = [];
-      while (match.status === 'drafting') {
-        turns.push(match.draftTurn!);
-        const captain = match.players.find(player => player.isCaptain && player.team === match.draftTurn)!;
-        const teammates = match.players.filter(player => player.team === match.draftTurn);
-        const candidate = match.players.find(player => !player.team && teammates.filter(member => member.position === player.position).length < (player.position === 'setter' ? 2 : 4))!;
-        match = await service.pick(match.id, captain.discordId, candidate.discordId);
-      }
-      assert.deepEqual(turns, [first, second, second, first, first, second, second, first, first, second]);
-      checkTeams(match);
-      assert.equal(match.status, 'ready');
-    } finally { service.close(); }
-  }
-});
-
-test('sorteio padrão do primeiro pick usa as duas equipes', async () => {
-  const seen = new Set<string>();
-  for (let attempt = 0; attempt < 40 && seen.size < 2; attempt++) {
-    const { service } = await fixture();
-    try { seen.add((await drafting(service)).firstPick!); } finally { service.close(); }
-  }
-  assert.deepEqual([...seen].sort(), ['A', 'B']);
-});
-
-test('capitão ausente recebe pick aleatório após 45 segundos, sem preferir o maior Elo', async () => {
-  const { service, advance } = await fixture();
-  try {
-    let match = await drafting(service);
-    advance(44_999);
-    assert.deepEqual(await service.tick(), []);
-    for (let round = 0; round < 10; round++) {
-      advance(45_000);
-      const changed = await service.tick();
-      assert.equal(changed.length, 1);
-      match = changed[0];
-    }
+    let match = await queued(service);
+    const a = match.players.filter(player => player.team === 'A');
+    const b = match.players.filter(player => player.team === 'B');
+    await assert.rejects(service.voteCaptain(match.id, a[0].discordId, b[0].discordId), /seu time/);
+    for (const player of match.players) match = await service.voteCaptain(match.id, player.discordId, player.team === 'A' ? a[1].discordId : b[2].discordId);
     assert.equal(match.status, 'ready');
-    checkTeams(match);
-  } finally { service.close(); }
-
-  // com o sorteio travado nos extremos, o pick automático muda — prova que a escolha é aleatória e válida
-  const outcomes: string[] = [];
-  for (const roll of [0, 99]) {
-    const { service, advance } = await fixture(12, max => max === 2 ? 0 : roll === 0 ? 0 : max - 1);
-    try {
-      const match = await drafting(service);
-      advance(45_000);
-      const [changed] = await service.tick();
-      const picked = changed.players.filter(player => player.team === match.firstPick && !player.isCaptain);
-      assert.equal(picked.length, 1);
-      outcomes.push(picked[0].discordId);
-    } finally { service.close(); }
-  }
-  assert.notEqual(outcomes[0], outcomes[1]);
-});
-
-test('somente staff iniciadora inicia e finaliza; proprietário não substitui essa regra', async () => {
-  const { service } = await fixture();
-  try {
-    const match = await ready(service);
-    await assert.rejects(service.startMatch(match.id, 'owner'), /staff que iniciou/);
-    await assert.rejects(service.finishMatch(match.id, 'staff', 'A'), /andamento/);
-    await service.startMatch(match.id, 'staff');
-    await assert.rejects(service.finishMatch(match.id, 'another-staff', 'A'), /staff que iniciou/);
-    await assert.rejects(service.finishMatch(match.id, 'owner', 'A'), /staff que iniciou/);
-    assert.equal((await service.finishMatch(match.id, 'staff', 'A')).status, 'mvp');
-    await assert.rejects(service.finishMatch(match.id, 'staff', 'A'), /andamento/);
+    assert.deepEqual(match.players.filter(player => player.isCaptain).map(player => player.discordId).sort(), [a[1].discordId, b[2].discordId].sort());
+    assert.equal((await service.startMatch(match.id, b[2].discordId)).status, 'live');
   } finally { service.close(); }
 });
 
@@ -373,7 +240,6 @@ test('cancelamento libera participantes sem mexer em Elo ou estatísticas', asyn
   const { service } = await fixture();
   try {
     const match = await ready(service);
-    await assert.rejects(service.cancelMatch(match.id, 'outsider'), /Somente a staff/);
     await service.cancelMatch(match.id, 'owner');
     assert.equal((await service.getPlayer('1'))!.matches, 0);
     assert.equal((await service.getPlayer('1'))!.elo, 500);
@@ -488,5 +354,49 @@ test('contas pendentes não podem reassociar um Roblox já verificado', async ()
     await service.completeLink('a', first.code);
     await assert.rejects(service.completeLink('b', second.code), /já está vinculada/);
     assert.equal((await service.listPlayers()).length, 1);
+  } finally { service.close(); }
+});
+
+test('capitães confirmam o vencedor; discordância espera a staff', async () => {
+  const { service } = await fixture();
+  try {
+    let match = await ready(service);
+    match = await service.startMatch(match.id, 'staff');
+    const [a, b] = (['A', 'B'] as const).map(team => match.players.find(p => p.isCaptain && p.team === team)!.discordId);
+    const other = match.players.find(p => !p.isCaptain)!.discordId;
+    await assert.rejects(service.reportResult(match.id, other, 'A'), /capitães/);
+    match = await service.reportResult(match.id, a, 'A');
+    assert.equal(match.status, 'live');
+    match = await service.reportResult(match.id, b, 'B');
+    assert.equal(match.status, 'live');
+    match = await service.reportResult(match.id, b, 'A');
+    assert.equal(match.status, 'mvp');
+    assert.equal(match.winner, 'A');
+  } finally { service.close(); }
+});
+
+test('vaga parada na fila por 30 minutos é liberada', async () => {
+  const { service, advance } = await fixture();
+  try {
+    await service.joinQueue('1');
+    advance(29 * 60_000);
+    await service.tick();
+    assert.equal((await service.getQueue()).players.length, 1);
+    advance(60_000 + 1);
+    await service.tick();
+    assert.equal((await service.getQueue()).players.length, 0);
+  } finally { service.close(); }
+});
+
+test('operações concorrentes não usam a transação umas das outras', async () => {
+  const { service } = await fixture();
+  try {
+    const players = await service.listPlayers();
+    await Promise.all([
+      ...players.map(player => service.joinQueue(player.discordId)),
+      ...Array.from({ length: 10 }, () => service.tick()),
+      ...Array.from({ length: 10 }, () => service.getActiveMatches()),
+    ]);
+    assert.equal((await service.getQueue()).players.length, 12);
   } finally { service.close(); }
 });

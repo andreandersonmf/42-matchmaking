@@ -1,6 +1,7 @@
 import { createClient, LibsqlError } from '@libsql/client';
 import { LibsqlBatchError, type InStatement, type InValue, type ResultSet, type Transaction } from '@libsql/client';
 import { createHash, randomBytes, randomInt } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { calculateElo, rankFor } from './ranks.js';
@@ -16,8 +17,12 @@ export class DomainError extends Error {
 type StoredMatch = Match & {
   modeBallots: Record<string, MatchMode>;
   mvpBallots: Record<string, string>;
+  /** Votos de capitão (eleitor -> candidato). Ausente em partidas antigas. */
+  captainBallots?: Record<string, string>;
   draftIndex: number;
 };
+const CAPTAIN_VOTE_MS = 30_000;
+const QUEUE_TTL_MS = 30 * 60_000;
 type JsonRow = { data: string };
 type DbHandle = { execute(stmt: InStatement): Promise<ResultSet> };
 const MODES: MatchMode[] = ['balanced', 'captains', 'random'];
@@ -25,6 +30,28 @@ const MODES: MatchMode[] = ['balanced', 'captains', 'random'];
 const SNAKE = [1, 2, 2, 1, 1, 2, 2, 1, 1, 2] as const;
 const PICK_SECONDS = 45_000;
 const ACTIVE = "('voting','captains','drafting','ready','live','mvp')";
+
+/**
+ * Monta os 12 da partida a partir da fila (em ordem de entrada): os mais antigos de cada posição entram
+ * primeiro. Se faltar spiker ou setter, os últimos a entrar da posição que sobrou tomam autofill.
+ */
+export function pickPlayers<T extends { position: Position }>(queue: T[]): (T & { autofill: boolean })[] | null {
+  if (queue.length < 12) return null;
+  const spikers = queue.filter(player => player.position === 'spiker');
+  const setters = queue.filter(player => player.position === 'setter');
+  const spikerCount = Math.min(8, spikers.length);
+  const setterCount = Math.min(4, setters.length);
+  const keep = (players: T[]) => players.map(player => ({ ...player, autofill: false }));
+  const fill = (players: T[], start: number, count: number, position: Position) =>
+    players.slice(start, start + count).map(player => ({ ...player, position, autofill: true }));
+  return [
+    ...keep(spikers.slice(0, spikerCount)), ...fill(setters, setterCount, 8 - spikerCount, 'spiker'),
+    ...keep(setters.slice(0, setterCount)), ...fill(spikers, spikerCount, 4 - setterCount, 'setter'),
+  ];
+}
+
+/** Autofill ganha o dobro na vitória e perde só metade na derrota. */
+export const autofillDelta = (delta: number): number => delta > 0 ? delta * 2 : Math.trunc(delta / 2) || 0;
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new DomainError(message);
@@ -65,8 +92,10 @@ export class MatchmakingService implements ServiceContract {
   private readonly random: (max: number) => number;
   private readonly ownerId: string;
   private readonly ready: Promise<void>;
-  private handle: DbHandle;
-  private transactionOpen = false;
+  /** Transação da chamada atual (por contexto assíncrono, nunca compartilhada entre chamadas concorrentes). */
+  private readonly currentTx = new AsyncLocalStorage<Transaction>();
+  // ponytail: transações em fila única; troque por controle por recurso se o volume crescer.
+  private txQueue: Promise<unknown> = Promise.resolve();
 
   constructor(target: string, options: ServiceOptions = {}) {
     this.now = options.now ?? Date.now;
@@ -74,7 +103,6 @@ export class MatchmakingService implements ServiceContract {
     this.ownerId = options.ownerId ?? '';
     const url = target === ':memory:' ? 'file::memory:' : target.includes('://') ? target : pathToFileURL(resolve(target)).href;
     this.client = url.startsWith('file:') ? createClient({ url }) : createClient({ url, authToken: options.authToken });
-    this.handle = this.client;
     this.ready = this.initialize();
   }
 
@@ -132,31 +160,30 @@ export class MatchmakingService implements ServiceContract {
 
   close() { this.client.close(); }
 
+  private get handle(): DbHandle {
+    return this.currentTx.getStore() ?? this.client;
+  }
+
   private async transaction<T>(action: () => Promise<T>): Promise<T> {
     await this.ready;
-    if (this.transactionOpen) return action();
-    let attempt = 0;
-    for (;;) {
-      const tx: Transaction = await this.client.transaction('write');
-      this.handle = tx;
-      this.transactionOpen = true;
-      try {
-        const result = await action();
-        await tx.commit();
-        return result;
-      } catch (error) {
-        await tx.rollback().catch(() => undefined);
-        if (isBusy(error) && attempt < 3) {
-          attempt++;
-          await delay(50 * attempt * attempt);
-          continue;
+    if (this.currentTx.getStore()) return action();
+    const attemptAll = async (): Promise<T> => {
+      for (let attempt = 0; ; attempt++) {
+        const tx: Transaction = await this.client.transaction('write');
+        try {
+          const result = await this.currentTx.run(tx, action);
+          await tx.commit();
+          return result;
+        } catch (error) {
+          await tx.rollback().catch(() => undefined);
+          if (isBusy(error) && attempt < 3) { await delay(50 * (attempt + 1) ** 2); continue; }
+          throw error;
         }
-        throw error;
-      } finally {
-        this.handle = this.client;
-        this.transactionOpen = false;
       }
-    }
+    };
+    const next = this.txQueue.then(attemptAll, attemptAll);
+    this.txQueue = next.catch(() => undefined);
+    return next;
   }
 
   private async rows<T = Record<string, unknown>>(sql: string, ...args: InValue[]): Promise<T[]> {
@@ -315,6 +342,7 @@ export class MatchmakingService implements ServiceContract {
       const player = await this.requiredPlayer(discordId);
       assert(!await this.hasActiveMatch(discordId), 'Você já participa de uma partida em andamento.');
       assert(!await this.row('SELECT discord_id FROM queue WHERE discord_id=?', discordId), 'Você já está na fila.');
+      assert((await this.rows('SELECT discord_id FROM queue')).length < 12, 'A fila está cheia (12/12). Aguarde a próxima partida.');
       if (position) {
         assert(position === 'spiker' || position === 'setter', 'Escolha Spiker ou Setter.');
         player.position = position;
@@ -338,7 +366,7 @@ export class MatchmakingService implements ServiceContract {
     const players = await Promise.all(rows.map(async row => ({ ...await this.requiredPlayer(row.discord_id), queuedAt: row.queued_at })));
     const spikers = players.filter(player => player.position === 'spiker').length;
     const setters = players.filter(player => player.position === 'setter').length;
-    return { players, spikers, setters, ready: spikers >= 8 && setters >= 4 };
+    return { players, spikers, setters, ready: players.length >= 12 };
   }
 
   private async readStored(id: number) {
@@ -348,7 +376,7 @@ export class MatchmakingService implements ServiceContract {
   }
 
   private publicMatch(match: StoredMatch): Match {
-    const { modeBallots, mvpBallots, draftIndex, ...result } = match;
+    const { modeBallots, mvpBallots, captainBallots, draftIndex, ...result } = match;
     return structuredClone({ ...result, firstPick: result.firstPick ?? null });
   }
 
@@ -399,11 +427,8 @@ export class MatchmakingService implements ServiceContract {
   async createMatch(initiatorId: string, channelId: string): Promise<Match> {
     return this.transaction(async () => {
       const queue = await this.getQueue();
-      assert(queue.ready, `São necessários 8 Spikers e 4 Setters. A fila tem ${queue.spikers} Spikers e ${queue.setters} Setters.`);
-      const selected = [
-        ...queue.players.filter(player => player.position === 'spiker').slice(0, 8),
-        ...queue.players.filter(player => player.position === 'setter').slice(0, 4),
-      ];
+      const selected = pickPlayers(queue.players);
+      assert(selected, `São necessários 12 jogadores na fila. A fila tem ${queue.players.length}.`);
       const createdAt = this.now();
       const inserted = await this.run('INSERT INTO matches(status,created_at,data) VALUES(?,?,?)', 'voting', createdAt, '{}');
       const match: StoredMatch = {
@@ -414,11 +439,13 @@ export class MatchmakingService implements ServiceContract {
         modeBallots: {}, mvpBallots: {}, draftIndex: 0,
         players: selected.map(player => ({
           discordId: player.discordId, name: player.name, robloxId: player.robloxId, robloxName: player.robloxName,
-          elo: player.elo, position: player.position, vip: player.vip, team: null, isCaptain: false,
+          elo: player.elo, position: player.position, autofill: player.autofill, vip: player.vip, team: null, isCaptain: false,
           eloDelta: null, mvpVotes: 0,
         })),
       };
       for (const player of selected) await this.run('DELETE FROM queue WHERE discord_id=?', player.discordId);
+      // Sem votação de modo e sem draft: os times saem balanceados por Elo e os jogadores só votam nos capitães.
+      this.resolveMode(match, 'balanced');
       await this.saveMatch(match);
       await this.audit(initiatorId, 'match.created', { matchId: match.id });
       return this.publicMatch(match);
@@ -451,17 +478,17 @@ export class MatchmakingService implements ServiceContract {
     });
   }
 
-  private resolveMode(match: StoredMatch) {
+  private resolveMode(match: StoredMatch, forced?: MatchMode) {
     const counts = (mode: MatchMode) => Object.values(match.modeBallots).filter(vote => vote === mode).length;
-    match.mode = [...MODES].sort((a, b) => counts(b) - counts(a))[0];
-    if (match.mode === 'captains') {
-      // A staff escolhe os capitães (um para cada equipe) direto no painel; o draft só começa depois disso.
-      match.status = 'captains';
-      match.draftTurn = null;
-      match.draftDeadline = null;
-      match.firstPick = null;
-      return;
-    }
+    match.mode = forced ?? [...MODES].sort((a, b) => counts(b) - counts(a))[0];
+    match.draftTurn = null;
+    match.draftDeadline = null;
+    match.firstPick = null;
+    // Em todo modo os jogadores votam nos capitães. No modo capitães o draft só começa depois disso.
+    match.status = 'captains';
+    match.captainBallots = {};
+    match.captainDeadline = this.now() + CAPTAIN_VOTE_MS;
+    if (match.mode === 'captains') return;
     const spikers = match.players.filter(player => player.position === 'spiker');
     const setters = match.players.filter(player => player.position === 'setter');
     let teamA: MatchPlayer[];
@@ -481,7 +508,51 @@ export class MatchmakingService implements ServiceContract {
     }
     const ids = new Set(teamA.map(player => player.discordId));
     for (const player of match.players) player.team = ids.has(player.discordId) ? 'A' : 'B';
+  }
+
+  /** Mais votados viram capitães: os 2 primeiros no modo capitães, ou o primeiro de cada time nos outros modos. */
+  private resolveCaptains(match: StoredMatch) {
+    const ballots = Object.values(match.captainBallots ?? {});
+    const tieKey = (id: string) => createHash('sha256').update(`mm42:cap:${match.id}:${id}`).digest('hex');
+    const ranked = (players: MatchPlayer[]) => [...players].sort((a, b) =>
+      ballots.filter(id => id === b.discordId).length - ballots.filter(id => id === a.discordId).length || tieKey(a.discordId).localeCompare(tieKey(b.discordId)));
+    match.captainDeadline = null;
+    if (match.mode === 'captains') {
+      const [first, second] = ranked(match.players);
+      first.team = 'A'; first.isCaptain = true;
+      second.team = 'B'; second.isCaptain = true;
+      this.startDraft(match);
+      return;
+    }
+    for (const team of ['A', 'B'] as Team[]) ranked(match.players.filter(player => player.team === team))[0].isCaptain = true;
     match.status = 'ready';
+  }
+
+  async voteCaptain(id: number, voterId: string, candidateId: string): Promise<Match> {
+    return this.transaction(async () => {
+      const match = await this.readStored(id);
+      assert(match.status === 'captains' && match.captainDeadline != null && this.now() < match.captainDeadline, 'A votação de capitão já terminou.');
+      this.assertParticipant(match, voterId);
+      const voter = match.players.find(player => player.discordId === voterId)!;
+      const candidate = match.players.find(player => player.discordId === candidateId);
+      assert(candidate, 'O capitão precisa ser um dos 12 jogadores desta partida.');
+      assert(voter.team === null || candidate.team === voter.team, 'Vote em alguém do seu time.');
+      match.captainBallots = { ...match.captainBallots, [voterId]: candidateId };
+      if (Object.keys(match.captainBallots).length === 12) this.resolveCaptains(match);
+      await this.saveMatch(match);
+      return this.publicMatch(match);
+    });
+  }
+
+  /** Passa o painel da partida para a sala privada; o resultado continua indo para o canal onde ela foi criada. */
+  async moveToRoom(id: number, roomId: string): Promise<void> {
+    await this.transaction(async () => {
+      const match = await this.readStored(id);
+      match.resultChannelId ??= match.channelId;
+      match.channelId = roomId;
+      match.messageId = null;
+      await this.saveMatch(match);
+    });
   }
 
   private canPick(match: StoredMatch, player: MatchPlayer) {
@@ -564,7 +635,7 @@ export class MatchmakingService implements ServiceContract {
   async startMatch(id: number, actorId: string): Promise<Match> {
     return this.transaction(async () => {
       const match = await this.readStored(id);
-      this.assertInitiator(match, actorId);
+      // Quem pode iniciar (capitão ou Match Organizer) é checado no bot, que conhece os cargos.
       assert(match.status === 'ready', 'A partida precisa ter os times definidos antes de começar.');
       for (const team of ['A', 'B']) {
         const players = match.players.filter(player => player.team === team);
@@ -578,15 +649,37 @@ export class MatchmakingService implements ServiceContract {
     });
   }
 
-  async finishMatch(id: number, actorId: string, winner: Team): Promise<Match> {
+  private finish(match: StoredMatch, winner: Team) {
+    match.winner = winner;
+    match.status = 'mvp';
+    match.mvpDeadline = this.now() + 60_000;
+  }
+
+  /** Cada capitão informa o vencedor; quando os dois concordam a partida é finalizada. */
+  async reportResult(id: number, captainId: string, winner: Team): Promise<Match> {
     return this.transaction(async () => {
       const match = await this.readStored(id);
-      this.assertInitiator(match, actorId);
+      assert(match.status === 'live', 'Somente uma partida em andamento pode ter resultado.');
+      assert(winner === 'A' || winner === 'B', 'Escolha o time A ou B como vencedor.');
+      const captain = match.players.find(player => player.isCaptain && player.discordId === captainId);
+      assert(captain?.team, 'Somente os capitães podem informar o resultado.');
+      match.resultReports = { ...match.resultReports, [captain.team]: winner };
+      if (match.resultReports.A && match.resultReports.A === match.resultReports.B) {
+        this.finish(match, winner);
+        await this.audit(captainId, 'match.result', { matchId: id, winner, byCaptains: true });
+      }
+      await this.saveMatch(match);
+      return this.publicMatch(match);
+    });
+  }
+
+  async finishMatch(id: number, actorId: string, winner: Team): Promise<Match> {
+    return this.transaction(async () => {
+      // Quem pode finalizar (qualquer Match Organizer) é checado no bot, que conhece os cargos.
+      const match = await this.readStored(id);
       assert(match.status === 'live', 'Somente uma partida em andamento pode ser finalizada.');
       assert(winner === 'A' || winner === 'B', 'Escolha o time A ou B como vencedor.');
-      match.winner = winner;
-      match.status = 'mvp';
-      match.mvpDeadline = this.now() + 60_000;
+      this.finish(match, winner);
       await this.saveMatch(match);
       await this.audit(actorId, 'match.result', { matchId: id, winner });
       return this.publicMatch(match);
@@ -620,11 +713,12 @@ export class MatchmakingService implements ServiceContract {
       const player = await this.requiredPlayer(participant.discordId);
       const won = participant.team === match.winner;
       const mvp = participant.discordId === match.mvpId;
-      const { delta } = calculateElo({
+      const base = calculateElo({
         elo: player.elo, teamAverage: averages[participant.team],
         opponentAverage: averages[participant.team === 'A' ? 'B' : 'A'],
         won, mvp, vip: participant.vip,
-      });
+      }).delta;
+      const delta = participant.autofill ? autofillDelta(base) : base;
       player.elo += delta;
       player.bestElo = Math.max(player.bestElo, player.elo);
       player.matches++;
@@ -645,7 +739,6 @@ export class MatchmakingService implements ServiceContract {
   async cancelMatch(id: number, actorId: string): Promise<Match> {
     return this.transaction(async () => {
       const match = await this.readStored(id);
-      assert(actorId === match.initiatorId || Boolean(this.ownerId && actorId === this.ownerId), 'Somente a staff responsável ou o proprietário pode cancelar esta partida.');
       assert(match.status !== 'completed' && match.status !== 'cancelled', 'Esta partida já foi encerrada.');
       match.status = 'cancelled';
       match.finishedAt = this.now();
@@ -688,6 +781,8 @@ export class MatchmakingService implements ServiceContract {
 
   async tick(): Promise<Match[]> {
     return this.transaction(async () => {
+      // Vaga parada na fila por mais de 30 minutos é liberada.
+      await this.run('DELETE FROM queue WHERE queued_at < ?', this.now() - QUEUE_TTL_MS);
       const rows = await this.rows<JsonRow>(`SELECT data FROM matches WHERE status IN ${ACTIVE}`);
       const changed: Match[] = [];
       for (const row of rows) {
@@ -695,6 +790,9 @@ export class MatchmakingService implements ServiceContract {
         let updated = false;
         if (match.status === 'voting' && this.now() >= match.modeDeadline) {
           this.resolveMode(match);
+          updated = true;
+        } else if (match.status === 'captains' && match.captainDeadline != null && this.now() >= match.captainDeadline) {
+          this.resolveCaptains(match);
           updated = true;
         } else if (match.status === 'drafting' && match.draftDeadline !== null && this.now() >= match.draftDeadline) {
           // Tempo esgotado: pick aleatório entre os jogadores que ainda cabem na composição do time da vez.
