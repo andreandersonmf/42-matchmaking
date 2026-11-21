@@ -114,7 +114,7 @@ export async function startBot(): Promise<(() => void) | undefined> {
     }
     client.guilds.fetch(config.guildId)
       .then(guild => ensureCouncilRole(guild))
-      .catch(error => console.warn(`Não foi possível criar o cargo Membro do Conselho.${errorDetail(error)}`));
+      .catch(error => console.warn(`Não foi possível criar o cargo Conselho.${errorDetail(error)}`));
     client.guilds.fetch(config.guildId)
       .then(guild => syncAllEloRoles(service, guild, console.warn))
       .catch(error => console.warn(`Não foi possível sincronizar os cargos de Elo na inicialização.${errorDetail(error)}`));

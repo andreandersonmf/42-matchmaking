@@ -284,6 +284,6 @@ test('denúncia: só o Conselho vota no ticket', async () => {
   vote.value.values = ['warning'];
   Object.assign(vote.value, { guild: { roles: { cache: { find: () => ({ id: '100000000000000099' }) } } } });
   await run(vote.event);
-  assert.match(vote.body(), /Membro do Conselho/);
+  assert.match(vote.body(), /cargo Conselho/);
   assert.equal(votes, 0);
 });

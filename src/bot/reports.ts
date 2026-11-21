@@ -8,7 +8,7 @@ import type { BotEnvironment } from './env.js';
 import { baseEmbed, NO_MENTIONS, plain, reportCode, reportPresentation, text, verdictNames } from './presentation.js';
 import { category, privateOverwrites } from './voice.js';
 
-export const COUNCIL_ROLE = 'Membro do Conselho';
+export const COUNCIL_ROLE = 'Conselho';
 export const REPORT_CATEGORY = 'Denúncias';
 const P = PermissionFlagsBits;
 const TICKET_ALLOW = [P.ViewChannel, P.SendMessages, P.ReadMessageHistory, P.AttachFiles, P.EmbedLinks];
