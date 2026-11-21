@@ -9,7 +9,7 @@ import type {
   LinkChallenge, Match, MatchFilter, MatchMode, MatchPlayer, Player, Position, RankedPlayer,
   Report, ServiceContract, Team, Verdict, VipTier,
 } from './types.js';
-import { VERDICTS } from './types.js';
+import { RESULT_VERDICTS, VERDICTS } from './types.js';
 
 export class DomainError extends Error {
   constructor(message: string) { super(message); this.name = 'DomainError'; }
@@ -37,6 +37,8 @@ const ACTIVE = "('voting','captains','drafting','ready','live','mvp')";
 const REPORT_WINDOW_MS = 24 * 60 * 60_000;
 const MAX_REPORTERS = 3;
 const MIN_BALLOTS = 2;
+/** accused_id do recurso de resultado: um por partida, nunca colide com um ID do Discord. */
+const CONTEST = 'result';
 
 /**
  * Monta os 12 da partida a partir da fila (em ordem de entrada): os mais antigos de cada posição entram
@@ -973,6 +975,34 @@ export class MatchmakingService implements ServiceContract {
     });
   }
 
+  /** Recurso do capitão do time que perdeu: o Conselho julga se o resultado publicado está certo. Um por partida. */
+  async openContest(matchId: number, captainId: string, reason: string): Promise<Report> {
+    return this.transaction(async () => {
+      const match = await this.readStored(matchId);
+      assert(match.status === 'completed' && match.winner !== null && match.finishedAt !== null, 'Só dá para contestar o resultado de uma partida concluída.');
+      const captain = match.players.find(player => player.discordId === captainId && player.isCaptain);
+      assert(captain && captain.team && captain.team !== match.winner, 'Somente o capitão do time que perdeu pode contestar o resultado.');
+      assert(this.now() - match.finishedAt <= REPORT_WINDOW_MS, 'O prazo para contestar o resultado (24 horas depois da partida) acabou.');
+      const text = reason.trim();
+      assert(text.length >= 10 && text.length <= 500, 'Escreva o motivo com 10 a 500 caracteres.');
+      assert(!await this.row('SELECT id FROM reports WHERE match_id=? AND accused_id=?', matchId, CONTEST), 'O resultado desta partida já foi contestado.');
+      const inserted = await this.run('INSERT INTO reports(status,match_id,accused_id,data) VALUES(?,?,?,?)', 'open', matchId, CONTEST, '{}');
+      const report: Report = {
+        id: Number(inserted.lastInsertRowid), kind: 'result', claimedWinner: captain.team, status: 'open', matchId, accusedId: CONTEST,
+        reporters: [{ id: captainId, reason: text, at: this.now() }], ballots: {}, verdict: null, decidedBy: null, closedBy: null,
+        channelId: null, messageId: null, createdAt: this.now(), closedAt: null,
+      };
+      await this.saveReport(report);
+      await this.audit(captainId, 'contest.opened', { reportId: report.id, matchId, claimedWinner: captain.team });
+      return report;
+    });
+  }
+
+  private assertVerdict(report: Report, verdict: Verdict) {
+    const allowed: readonly string[] = report.kind === 'result' ? RESULT_VERDICTS : VERDICTS;
+    assert(allowed.includes(verdict), 'Voto inválido.');
+  }
+
   async attachReport(id: number, channelId: string, messageId: string): Promise<void> {
     await this.transaction(async () => {
       const report = await this.readReport(id);
@@ -987,8 +1017,12 @@ export class MatchmakingService implements ServiceContract {
     return this.transaction(async () => {
       const report = await this.readReport(id);
       this.assertOpenReport(report);
-      assert(VERDICTS.includes(verdict), 'Voto inválido.');
+      this.assertVerdict(report, verdict);
       assert(voterId !== report.accusedId && !report.reporters.some(reporter => reporter.id === voterId), 'Você é parte deste caso e não pode votar.');
+      if (report.kind === 'result') {
+        const match = await this.readStored(report.matchId);
+        assert(!match.players.some(player => player.discordId === voterId), 'Você jogou esta partida e não pode votar no recurso.');
+      }
       report.ballots[voterId] = verdict;
       await this.saveReport(report);
       await this.audit(voterId, 'report.voted', { reportId: id, verdict });
@@ -1022,13 +1056,20 @@ export class MatchmakingService implements ServiceContract {
     return this.transaction(async () => {
       const report = await this.readReport(id);
       assert(report.status === 'tied', report.status === 'open' ? 'Este caso ainda está em votação no Conselho.' : 'Este caso já foi encerrado.');
-      assert(VERDICTS.includes(verdict), 'Decisão inválida.');
+      this.assertVerdict(report, verdict);
       await this.applyVerdict(report, verdict, actorId, 'admin');
       return report;
     });
   }
 
   private async applyVerdict(report: Report, verdict: Verdict, actorId: string, by: 'council' | 'admin') {
+    if (report.kind === 'result') {
+      if (verdict === 'reverse') await this.reverseResult(report.matchId, actorId);
+      Object.assign(report, { status: 'closed', verdict, decidedBy: by, closedBy: actorId, closedAt: this.now() });
+      await this.saveReport(report);
+      await this.audit(actorId, by === 'admin' ? 'contest.decided' : 'contest.closed', { reportId: report.id, matchId: report.matchId, verdict, by });
+      return;
+    }
     const player = await this.requiredPlayer(report.accusedId);
     const details: Record<string, unknown> = { reportId: report.id, playerId: report.accusedId, verdict, by };
     if (verdict === 'warning') {
@@ -1048,5 +1089,40 @@ export class MatchmakingService implements ServiceContract {
     Object.assign(report, { status: 'closed', verdict, decidedBy: by, closedBy: actorId, closedAt: this.now() });
     await this.saveReport(report);
     await this.audit(actorId, by === 'admin' ? 'report.decided' : 'report.closed', details);
+  }
+
+  /**
+   * Recurso aceito: desfaz o Elo e as estatísticas que a partida deu e fecha de novo com o outro time vencedor,
+   * pela mesma conta do settle. Partidas jogadas depois continuam valendo.
+   */
+  private async reverseResult(matchId: number, actorId: string) {
+    const match = await this.readStored(matchId);
+    assert(match.status === 'completed' && match.winner !== null, 'Só uma partida concluída pode ter o resultado invertido.');
+    const oldWinner = match.winner;
+    for (const participant of match.players) {
+      const player = await this.requiredPlayer(participant.discordId);
+      const delta = participant.eloDelta ?? 0;
+      const won = participant.team === oldWinner;
+      const before = player.elo;
+      player.elo = Math.max(0, before - delta);
+      player.matches = Math.max(0, player.matches - 1);
+      player.wins = Math.max(0, player.wins - Number(won));
+      player.losses = Math.max(0, player.losses - Number(!won));
+      player.mvps = Math.max(0, player.mvps - Number(participant.discordId === match.mvpId));
+      // ponytail: a sequência de quem tinha perdido não volta (o settle zerou); só a de quem ganhou desce 1.
+      if (won) player.streak = Math.max(0, player.streak - 1);
+      await this.savePlayer(player);
+      const role = await this.row<{ elo: number; games: number }>('SELECT elo, games FROM role_elo WHERE discord_id=? AND role=?', player.discordId, participant.position);
+      if (role) await this.run('UPDATE role_elo SET elo=?, games=? WHERE discord_id=? AND role=?', Math.max(0, role.elo - delta), Math.max(0, role.games - 1), player.discordId, participant.position);
+      await this.run('INSERT INTO elo_events(discord_id,match_id,at,elo,delta) VALUES(?,?,?,?,?)', player.discordId, match.id, this.now(), player.elo, player.elo - before);
+      participant.eloDelta = null;
+    }
+    const finishedAt = match.finishedAt;
+    match.winner = oldWinner === 'A' ? 'B' : 'A';
+    match.status = 'mvp';
+    await this.settle(match);
+    match.finishedAt = finishedAt;
+    await this.saveMatch(match);
+    await this.audit(actorId, 'match.reversed', { matchId, from: oldWinner, to: match.winner });
   }
 }

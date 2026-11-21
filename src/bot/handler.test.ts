@@ -287,3 +287,19 @@ test('denúncia: só o Conselho vota no ticket', async () => {
   assert.match(vote.body(), /cargo Conselho/);
   assert.equal(votes, 0);
 });
+
+test('recurso: só o capitão do time que perdeu abre o formulário, sem defer', async () => {
+  const done = match({ status: 'completed', winner: 'A' });
+  done.players.forEach((p, i) => { p.team = i % 2 === 0 ? 'A' : 'B'; p.isCaptain = i < 2; });
+  const { run } = handler({ getMatch: async () => done });
+  for (const id of [playerId(0), playerId(3)]) {
+    const refused = interaction('button', 'mm:m:42:contest', id);
+    await run(refused.event);
+    assert.match(refused.body(), /capitão do time que perdeu/);
+    assert.equal(refused.value.modals.length, 0);
+  }
+  const captain = interaction('button', 'mm:m:42:contest', playerId(1));
+  await run(captain.event);
+  assert.equal(captain.deferred.length, 0);
+  assert.equal((captain.value.modals[0] as { toJSON(): { custom_id: string } }).toJSON().custom_id, 'mm:c:42');
+});

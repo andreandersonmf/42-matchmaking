@@ -135,9 +135,20 @@ test('denúncia: botão no ao vivo, MVP e resultado; ticket esconde votos até f
   };
   const open = reportPresentation(report, 'Roblox_0');
   const openText = JSON.stringify(open.embeds[0].toJSON());
-  assert.doesNotMatch(openText, /Advertência/);
-  const closeButton = open.components[1].toJSON().components[0] as { disabled?: boolean };
+  // O voto de cada conselheiro aparece ao vivo.
+  assert.match(openText, new RegExp(`<@${playerId(9)}>: Advertência`));
+  const closeButton = open.components[1].toJSON().components[0] as { disabled?: boolean; label?: string };
   assert.equal(closeButton.disabled, true);
+  assert.match(closeButton.label!, /falta 1 voto/);
+  const two = reportPresentation({ ...report, ballots: { ...report.ballots, [playerId(10)]: 'warning' } }, 'Roblox_0');
+  assert.match((two.components[1].toJSON().components[0] as { label: string }).label, /vence: Advertência/);
+  const contest = reportPresentation({ ...report, kind: 'result', claimedWinner: 'B', accusedId: 'result', ballots: { [playerId(9)]: 'reverse' } }, '');
+  const contestText = JSON.stringify(contest.embeds[0].toJSON());
+  assert.match(contestText, /RECURSO DE RESULTADO/);
+  assert.match(contestText, /Inverter: Equipe B venceu/);
+  assert.deepEqual((contest.components[0].toJSON().components[0] as { options: { value: string }[] }).options.map(o => o.value), ['keep', 'reverse']);
+  assert.ok(ids('completed', false).some(c => c.custom_id === 'mm:m:42:contest'));
+  assert.ok(!ids('live').some(c => c.custom_id === 'mm:m:42:contest'));
   const closed = reportPresentation({ ...report, status: 'closed', verdict: 'warning', decidedBy: 'council' }, 'Roblox_0');
   assert.match(JSON.stringify(closed.embeds[0].toJSON()), /Advertência/);
   assert.equal(closed.components.length, 0);

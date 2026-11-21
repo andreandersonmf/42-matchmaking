@@ -2,10 +2,11 @@ import {
   ActionRowBuilder, ChannelType, ModalBuilder, PermissionFlagsBits, StringSelectMenuBuilder, TextInputBuilder, TextInputStyle,
   type ButtonInteraction, type Guild, type ModalSubmitInteraction, type Role, type StringSelectMenuInteraction, type TextChannel,
 } from 'discord.js';
-import { VERDICTS, type Report, type ServiceContract, type Verdict } from '../core/types.js';
+import { RESULT_VERDICTS, VERDICTS, type Report, type ServiceContract, type Verdict } from '../core/types.js';
 import { BotError, requireStaff, selectedPlayer, type Actor, type ComponentAction } from './access.js';
 import type { BotEnvironment } from './env.js';
-import { baseEmbed, NO_MENTIONS, plain, reportCode, reportPresentation, text, verdictNames } from './presentation.js';
+import { baseEmbed, matchPresentation, NO_MENTIONS, plain, reportCode, reportPresentation, text, verdictLabel } from './presentation.js';
+import { renderResult } from './result.js';
 import { category, privateOverwrites } from './voice.js';
 
 export const COUNCIL_ROLE = 'Conselho';
@@ -22,13 +23,14 @@ export async function ensureCouncilRole(guild: Guild): Promise<Role> {
 
 export interface ReportDependencies {
   service: ServiceContract;
-  config: Pick<BotEnvironment, 'ownerId' | 'staffRoleId'>;
+  config: Pick<BotEnvironment, 'ownerId' | 'staffRoleId' | 'resultChannelId' | 'siteUrl'>;
   resolveActor(interaction: ButtonInteraction | StringSelectMenuInteraction): Promise<Actor>;
   syncRoles?: (userId: string, elo: number) => Promise<string | undefined>;
   report: (message: string) => void;
 }
 
-export type ReportAction = Extract<ComponentAction, { kind: 'report' | 'reportpick' } | { kind: 'reportform' } | { kind: 'ticket' }>;
+export type ReportAction = Extract<ComponentAction, { kind: 'report' | 'reportpick' | 'contest' | 'contestform' } | { kind: 'reportform' } | { kind: 'ticket' }>;
+const ALL_VERDICTS: readonly string[] = [...VERDICTS, ...RESULT_VERDICTS];
 
 export function createReportHandler(deps: ReportDependencies) {
   const { service, config, report } = deps;
@@ -116,6 +118,45 @@ export function createReportHandler(deps: ReportDependencies) {
       embeds: [baseEmbed('DENÚNCIA REGISTRADA', `Mande as provas (prints, clipes, links) em <#${channelId}>. O Conselho vai analisar e votar.`)] });
   }
 
+  /** Botão Contestar resultado: só o capitão do time que perdeu; abre o formulário (sem deferReply). */
+  async function contest(interaction: ButtonInteraction, matchId: number) {
+    const match = await loadMatch(matchId);
+    const captain = match.players.find(player => player.discordId === interaction.user.id && player.isCaptain);
+    if (match.status !== 'completed' || !captain || captain.team === match.winner) throw new BotError('Somente o capitão do time que perdeu pode contestar o resultado.');
+    await interaction.showModal(new ModalBuilder().setCustomId(`mm:c:${match.id}`).setTitle(`Contestar a partida #${String(match.id).padStart(4, '0')}`)
+      .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(new TextInputBuilder().setCustomId('reason')
+        .setLabel(`Por que a Equipe ${captain.team} venceu?`).setPlaceholder('Conte o placar real. Os prints ou clipes do placar você manda no canal do recurso.')
+        .setStyle(TextInputStyle.Paragraph).setMinLength(10).setMaxLength(500).setRequired(true))));
+  }
+
+  /** Formulário do recurso: registra e abre o canal para os dois capitães, o Conselho e a staff. */
+  async function contestForm(interaction: ModalSubmitInteraction, matchId: number) {
+    const guild = interaction.guild;
+    if (!guild) throw new BotError('Use o recurso dentro do servidor.');
+    const opened = await service.openContest(matchId, interaction.user.id, interaction.fields.getTextInputValue('reason'));
+    const match = await loadMatch(matchId);
+    const captains = match.players.filter(player => player.isCaptain).map(player => player.discordId);
+    const channelId = await (async () => {
+      const council = await ensureCouncilRole(guild);
+      const channel = await guild.channels.create({
+        name: `recurso-${reportCode(opened.id)}`, type: ChannelType.GuildText, parent: await category(guild, REPORT_CATEGORY),
+        permissionOverwrites: privateOverwrites(guild, captains, [council.id, config.staffRoleId], TICKET_ALLOW),
+      });
+      const panel = await channel.send(reportPresentation(opened, ''));
+      await service.attachReport(opened.id, channel.id, panel.id);
+      await channel.send({
+        content: `<@&${council.id}> recurso contra o resultado da partida #${String(matchId).padStart(4, '0')}. ${captains.map(id => `<@${id}>`).join(' ')}, mandem aqui os prints ou clipes do placar, de preferência com o horário da partida.`,
+        allowedMentions: { roles: [council.id], users: captains },
+      });
+      return channel.id;
+    })().catch(() => {
+      report(`O recurso #${opened.id} foi salvo, mas o canal não pôde ser criado.`);
+      throw new BotError('Seu recurso foi registrado, mas o canal não pôde ser aberto agora. Avise a staff.');
+    });
+    await interaction.editReply({ content: '', components: [], allowedMentions: NO_MENTIONS,
+      embeds: [baseEmbed('RECURSO REGISTRADO', `Mande os prints ou clipes do placar em <#${channelId}>. O Conselho vai analisar e votar.`)] });
+  }
+
   /** Votar, encerrar ou desempatar no painel do ticket. */
   async function ticket(interaction: ButtonInteraction | StringSelectMenuInteraction, reportId: number, action: 'vote' | 'close' | 'decide') {
     const guild = interaction.guild;
@@ -124,7 +165,7 @@ export function createReportHandler(deps: ReportDependencies) {
     if (!current || current.messageId !== interaction.message.id) throw new BotError('Este painel de denúncia não é o atual.');
     const actor = await deps.resolveActor(interaction);
     const verdict = (): Verdict => {
-      if (!interaction.isStringSelectMenu() || interaction.values.length !== 1 || !VERDICTS.includes(interaction.values[0] as Verdict)) throw new BotError('Escolha uma opção do menu.');
+      if (!interaction.isStringSelectMenu() || interaction.values.length !== 1 || !ALL_VERDICTS.includes(interaction.values[0])) throw new BotError('Escolha uma opção do menu.');
       return interaction.values[0] as Verdict;
     };
     let updated: Report;
@@ -132,23 +173,23 @@ export function createReportHandler(deps: ReportDependencies) {
     if (action === 'decide') {
       requireStaff(actor, config);
       updated = await service.decideReport(reportId, actor.id, verdict());
-      confirmation = `Decisão registrada: **${verdictNames[updated.verdict!]}**.`;
+      confirmation = `Decisão registrada: **${verdictLabel(updated, updated.verdict!)}**.`;
     } else {
       const council = councilRole(guild);
       if (!council || !actor.roles.includes(council.id)) throw new BotError(`Somente quem tem o cargo ${COUNCIL_ROLE} pode votar e encerrar casos.`);
       if (action === 'vote') {
         updated = await service.voteReport(reportId, actor.id, verdict());
-        confirmation = `Seu voto foi registrado: **${verdictNames[updated.ballots[actor.id]]}**. Você pode trocar até o caso fechar.`;
+        confirmation = `Seu voto foi registrado: **${verdictLabel(updated, updated.ballots[actor.id])}**. Você pode trocar até o caso fechar.`;
       } else {
         updated = await service.closeReport(reportId, actor.id);
-        confirmation = updated.status === 'tied' ? 'A votação empatou. Um admin vai decidir.' : `Caso encerrado: **${verdictNames[updated.verdict!]}**.`;
+        confirmation = updated.status === 'tied' ? 'A votação empatou. Um admin vai decidir.' : `Caso encerrado: **${verdictLabel(updated, updated.verdict!)}**.`;
       }
     }
     const name = await accusedName(updated);
     await interaction.message.edit(reportPresentation(updated, name)).catch(() => report('Não foi possível atualizar o painel de um ticket.'));
     const channel = interaction.channel as TextChannel | null;
     if (updated.status === 'tied' && action === 'close') {
-      await channel?.send({ content: `<@&${config.staffRoleId}> a votação da denúncia #${reportCode(updated.id)} empatou. Um admin escolhe a decisão no painel.`, allowedMentions: { roles: [config.staffRoleId] } })
+      await channel?.send({ content: `<@&${config.staffRoleId}> a votação do caso #${reportCode(updated.id)} empatou. Um admin escolhe a decisão no painel.`, allowedMentions: { roles: [config.staffRoleId] } })
         .catch(() => report('Não foi possível avisar a staff do empate.'));
     }
     if (updated.status === 'closed') await finalize(updated, name, channel, guild);
@@ -156,11 +197,15 @@ export function createReportHandler(deps: ReportDependencies) {
   }
 
   async function finalize(closed: Report, name: string, channel: TextChannel | null, guild: Guild) {
-    const verdict = verdictNames[closed.verdict!];
+    const verdict = verdictLabel(closed, closed.verdict!);
     await channel?.send({ content: `Caso encerrado. Decisão${closed.decidedBy === 'admin' ? ' do admin' : ' do Conselho'}: **${verdict}**. O canal fica arquivado.`, allowedMentions: NO_MENTIONS })
       .catch(() => undefined);
     for (const reporter of closed.reporters) {
       await channel?.permissionOverwrites.edit(reporter.id, { SendMessages: false }).catch(() => report('Não foi possível fechar o ticket para um denunciante.'));
+    }
+    if (closed.kind === 'result') {
+      if (closed.verdict === 'reverse') await publishCorrection(closed, guild);
+      return;
     }
     if (closed.verdict!.startsWith('elo:') && deps.syncRoles) {
       const player = await service.getPlayer(closed.accusedId);
@@ -172,9 +217,31 @@ export function createReportHandler(deps: ReportDependencies) {
       .catch(() => report(`Não foi possível mandar DM com a decisão da denúncia #${closed.id}.`));
   }
 
+  /** Recurso aceito: posta o resultado corrigido no canal de resultados e atualiza os cargos de Elo dos 12. */
+  async function publishCorrection(closed: Report, guild: Guild) {
+    const match = await loadMatch(closed.matchId);
+    const channelId = config.resultChannelId ?? match.resultChannelId ?? match.channelId;
+    try {
+      const target = channelId ? await guild.channels.fetch(channelId) as TextChannel | null : null;
+      if (!target) throw new Error('sem canal');
+      const payload = matchPresentation(match, config.siteUrl, false);
+      await target.send({ ...payload, content: `**Resultado corrigido pelo Conselho** (recurso #${reportCode(closed.id)}): a **Equipe ${match.winner}** venceu a partida #${String(match.id).padStart(4, '0')}. O Elo foi refeito.`, files: [await renderResult(match)] });
+    } catch {
+      report(`O resultado da partida #${match.id} foi invertido, mas a correção não pôde ser publicada no canal de resultados.`);
+    }
+    if (deps.syncRoles) {
+      for (const participant of match.players) {
+        const player = await service.getPlayer(participant.discordId);
+        if (player) await deps.syncRoles(player.discordId, player.elo).catch(() => undefined);
+      }
+    }
+  }
+
   return {
     pick,
     form,
+    contest,
+    contestForm,
     /** Botão Denunciar e controles do ticket (já com deferReply). */
     async component(interaction: ButtonInteraction | StringSelectMenuInteraction, action: ReportAction) {
       if (action.kind === 'report' && interaction.isButton()) return button(interaction, action.matchId);

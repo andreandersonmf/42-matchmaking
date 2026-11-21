@@ -39,7 +39,7 @@ export type ComponentAction =
   | { kind: 'mode'; matchId: number; mode: MatchMode }
   | { kind: 'captain' | 'win'; matchId: number; team: Team }
   | { kind: 'pick' | 'mvp' | 'start' | 'ready' | 'leave' | 'sub'; matchId: number }
-  | { kind: 'report' | 'reportpick'; matchId: number }
+  | { kind: 'report' | 'reportpick' | 'contest' | 'contestform'; matchId: number }
   | { kind: 'subin'; matchId: number; outId: string }
   | { kind: 'reportform'; matchId: number; accusedId: string }
   | { kind: 'ticket'; reportId: number; action: 'vote' | 'close' | 'decide' };
@@ -50,9 +50,11 @@ export function parseCustomId(value: string): ComponentAction | null {
   if (queue) return { kind: 'queue', action: queue[1] as Position | 'leave' | 'status' | 'join' | 'open' };
   const form = /^mm:r:([1-9]\d{0,15}):([1-9]\d{16,19})$/.exec(value);
   if (form && Number.isSafeInteger(Number(form[1]))) return { kind: 'reportform', matchId: Number(form[1]), accusedId: form[2] };
+  const contest = /^mm:c:([1-9]\d{0,15})$/.exec(value);
+  if (contest && Number.isSafeInteger(Number(contest[1]))) return { kind: 'contestform', matchId: Number(contest[1]) };
   const ticket = /^mm:t:([1-9]\d{0,15}):(vote|close|decide)$/.exec(value);
   if (ticket && Number.isSafeInteger(Number(ticket[1]))) return { kind: 'ticket', reportId: Number(ticket[1]), action: ticket[2] as 'vote' | 'close' | 'decide' };
-  const match = /^mm:m:([1-9]\d{0,15}):(mode:(captains|balanced|random)|cap:([AB])|win:([AB])|subin:([1-9]\d{16,19})|pick|mvp|start|ready|leave|sub|report|reportpick)$/.exec(value);
+  const match = /^mm:m:([1-9]\d{0,15}):(mode:(captains|balanced|random)|cap:([AB])|win:([AB])|subin:([1-9]\d{16,19})|pick|mvp|start|ready|leave|sub|report|reportpick|contest)$/.exec(value);
   if (!match) return null;
   const matchId = Number(match[1]);
   if (!Number.isSafeInteger(matchId)) return null;
@@ -60,7 +62,7 @@ export function parseCustomId(value: string): ComponentAction | null {
   if (match[4]) return { kind: 'captain', matchId, team: match[4] as Team };
   if (match[5]) return { kind: 'win', matchId, team: match[5] as Team };
   if (match[6]) return { kind: 'subin', matchId, outId: match[6] };
-  return { kind: match[2] as 'pick' | 'mvp' | 'start' | 'ready' | 'leave' | 'sub' | 'report' | 'reportpick', matchId };
+  return { kind: match[2] as 'pick' | 'mvp' | 'start' | 'ready' | 'leave' | 'sub' | 'report' | 'reportpick' | 'contest', matchId };
 }
 
 export function selectedPlayer(values: readonly string[]): string {

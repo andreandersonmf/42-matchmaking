@@ -566,3 +566,66 @@ test('staff verifica manualmente pelo nick e ID, sem código, e não duplica con
     await assert.rejects(service.manualLink('staff', '51', 'Outro', '777', 'NickRoblox', 'spiker'), /já está vinculada/);
   } finally { service.close(); }
 });
+
+async function settled(winner: 'A' | 'B') {
+  // Sorteio fixo: as duas partidas comparadas no teste de inversão saem com os mesmos times.
+  const { service, advance } = await fixture(12, () => 0);
+  const match = await ready(service);
+  await service.startMatch(match.id, 'staff');
+  await service.finishMatch(match.id, 'staff', winner);
+  advance(60_000);
+  await service.tick();
+  return { service, advance, match: (await service.getMatch(match.id))! };
+}
+
+test('recurso: só o capitão que perdeu, uma vez por partida, até 24h; quem jogou não vota', async () => {
+  const { service, advance, match } = await settled('A');
+  try {
+    const loser = match.players.find(p => p.isCaptain && p.team === 'B')!.discordId;
+    const winner = match.players.find(p => p.isCaptain && p.team === 'A')!.discordId;
+    const player = match.players.find(p => !p.isCaptain && p.team === 'B')!.discordId;
+    const reason = 'Ganhamos por 25 a 20, o capitão marcou errado.';
+    await assert.rejects(service.openContest(match.id, winner, reason), /capitão do time que perdeu/);
+    await assert.rejects(service.openContest(match.id, player, reason), /capitão do time que perdeu/);
+    const contest = await service.openContest(match.id, loser, reason);
+    assert.equal(contest.kind, 'result');
+    assert.equal(contest.claimedWinner, 'B');
+    await assert.rejects(service.openContest(match.id, loser, reason), /já foi contestado/);
+    await assert.rejects(service.voteReport(contest.id, player, 'reverse'), /jogou esta partida/);
+    await assert.rejects(service.voteReport(contest.id, 'c1', 'warning'), /inválido/);
+    await service.voteReport(contest.id, 'c1', 'keep');
+    await service.voteReport(contest.id, 'c2', 'keep');
+    const before = await service.listPlayers();
+    assert.equal((await service.closeReport(contest.id, 'c1')).verdict, 'keep');
+    assert.deepEqual(await service.listPlayers(), before);
+    assert.equal((await service.getMatch(match.id))!.winner, 'A');
+    advance(24 * 60 * 60_000);
+    const other = await settled('A');
+    try {
+      other.advance(24 * 60 * 60_000 + 1);
+      const captain = other.match.players.find(p => p.isCaptain && p.team === 'B')!.discordId;
+      await assert.rejects(other.service.openContest(other.match.id, captain, reason), /prazo/);
+    } finally { other.service.close(); }
+  } finally { service.close(); }
+});
+
+test('recurso aceito: inverter dá o mesmo Elo e estatísticas que o outro time ter vencido', async () => {
+  const reversed = await settled('A');
+  const direct = await settled('B');
+  try {
+    const captain = reversed.match.players.find(p => p.isCaptain && p.team === 'B')!.discordId;
+    const contest = await reversed.service.openContest(reversed.match.id, captain, 'O placar final foi 25 a 23 para nós.');
+    await reversed.service.voteReport(contest.id, 'c1', 'reverse');
+    await reversed.service.voteReport(contest.id, 'c2', 'reverse');
+    const closed = await reversed.service.closeReport(contest.id, 'c1');
+    assert.equal(closed.verdict, 'reverse');
+    const match = (await reversed.service.getMatch(reversed.match.id))!;
+    assert.equal(match.winner, 'B');
+    assert.equal(match.status, 'completed');
+    assert.equal(match.finishedAt, reversed.match.finishedAt);
+    const stats = (players: { discordId: string; elo: number; wins: number; losses: number; matches: number }[]) =>
+      players.map(p => [p.discordId, p.elo, p.wins, p.losses, p.matches]).sort();
+    assert.deepEqual(stats(await reversed.service.listPlayers()), stats(await direct.service.listPlayers()));
+    assert.deepEqual(match.players.map(p => p.eloDelta), (await direct.service.getMatch(direct.match.id))!.players.map(p => p.eloDelta));
+  } finally { reversed.service.close(); direct.service.close(); }
+});

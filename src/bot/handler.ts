@@ -277,7 +277,8 @@ ${note}` : ''}`);
       else await info(interaction, action.action === 'leave' ? 'VOCÊ SAIU DA FILA' : 'VOCÊ ESTÁ NA FILA', `**${queue.players.length}/12** na fila. Com 12 jogadores a partida começa sozinha.`);
       return;
     }
-    if (action.kind === 'report' || action.kind === 'reportpick' || action.kind === 'reportform' || action.kind === 'ticket') {
+    if (action.kind === 'report' || action.kind === 'reportpick' || action.kind === 'reportform' || action.kind === 'ticket'
+      || action.kind === 'contest' || action.kind === 'contestform') {
       await reports.component(interaction, action);
       return;
     }
@@ -379,11 +380,13 @@ ${note}` : ''}`);
       const action = interaction.isChatInputCommand() ? null : parseCustomId(interaction.customId);
       // O formulário da denúncia precisa ser a primeira resposta da interação: sem deferReply antes.
       if (action?.kind === 'reportpick' && interaction.isStringSelectMenu()) { await reports.pick(interaction, action.matchId); return; }
+      if (action?.kind === 'contest' && interaction.isButton()) { await reports.contest(interaction, action.matchId); return; }
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       if (interaction.isChatInputCommand()) await command(interaction);
       else if (interaction.isModalSubmit()) {
-        if (action?.kind !== 'reportform') throw new BotError('Formulário inválido ou desatualizado.');
-        await reports.form(interaction, action.matchId, action.accusedId);
+        if (action?.kind === 'contestform') await reports.contestForm(interaction, action.matchId);
+        else if (action?.kind === 'reportform') await reports.form(interaction, action.matchId, action.accusedId);
+        else throw new BotError('Formulário inválido ou desatualizado.');
       } else await component(interaction);
     } catch (error) {
       if (!(error instanceof BotError || error instanceof DomainError)) report(`Erro inesperado em uma interação.${errorDetail(error)}`);

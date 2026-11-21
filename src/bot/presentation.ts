@@ -1,7 +1,7 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, StringSelectMenuBuilder, escapeMarkdown } from 'discord.js';
 import { rankFor } from '../core/ranks.js';
 import type { Match, MatchMode, MatchPlayer, MatchStatus, QueueState, Report, Team, Verdict, VipTier } from '../core/types.js';
-import { VERDICTS } from '../core/types.js';
+import { RESULT_VERDICTS, VERDICTS } from '../core/types.js';
 import { safeSiteUrl } from './env.js';
 
 export const COLOR = 0xef4053;
@@ -164,13 +164,17 @@ export function matchPresentation(match: Match, siteUrl?: string, interactive = 
   }
   if (match.status === 'live' || match.status === 'mvp' || match.status === 'completed') {
     // Fica ativo também na mensagem de resultado (não interativa): o prazo de 24h é conferido pela engine.
-    components.push(new ActionRowBuilder<ButtonBuilder>().addComponents(new ButtonBuilder().setCustomId(`mm:m:${match.id}:report`)
-      .setLabel('Denunciar jogador').setStyle(ButtonStyle.Secondary).setDisabled(!interactive && match.status !== 'completed')));
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(new ButtonBuilder().setCustomId(`mm:m:${match.id}:report`)
+      .setLabel('Denunciar jogador').setStyle(ButtonStyle.Secondary).setDisabled(!interactive && match.status !== 'completed'));
+    if (match.status === 'completed') row.addComponents(new ButtonBuilder().setCustomId(`mm:m:${match.id}:contest`)
+      .setLabel('Contestar resultado (capitão)').setStyle(ButtonStyle.Secondary));
+    components.push(row);
   }
   if (match.status === 'completed') {
     const mvp = match.players.find(player => player.discordId === match.mvpId);
     description.push('', `Vitória da **Equipe ${match.winner}** · MVP: **${mvp ? text(mvp.robloxName, 20) : 'Sem MVP'}**`,
-      'Partida encerrada. Elo e estatísticas processados pela engine. Consulte seu novo cartão com **/profile**.');
+      'Partida encerrada. Elo e estatísticas processados pela engine. Consulte seu novo cartão com **/profile**.',
+      'Resultado errado? O capitão do time que perdeu tem **24 horas** para clicar em **Contestar resultado** e mandar prints ou clipes do placar, de preferência com o horário da partida.');
   } else if (match.status === 'cancelled') {
     description.push('', 'Esta partida foi cancelada. Nenhum resultado foi contabilizado. Consulte o painel para entrar novamente na fila.');
   }
@@ -237,35 +241,68 @@ export function replaceable(match: Match, now = Date.now()): MatchPlayer[] {
 export const verdictNames: Record<Verdict, string> = {
   innocent: 'Inocente', warning: 'Advertência', 'elo:25': 'Perder 25 de Elo', 'elo:50': 'Perder 50 de Elo', 'elo:100': 'Perder 100 de Elo',
   'susp:1': 'Suspensão da fila: 1 dia', 'susp:3': 'Suspensão da fila: 3 dias', 'susp:7': 'Suspensão da fila: 7 dias',
+  keep: 'Manter o resultado', reverse: 'Inverter o resultado',
 };
 
 export const reportCode = (id: number): string => String(id).padStart(4, '0');
 
-/** Painel do ticket. O voto de cada conselheiro só aparece depois que o caso sai da votação. */
+/** Nome do voto no contexto do caso: no recurso, "inverter" diz qual time passa a ser o vencedor. */
+export function verdictLabel(report: Report, verdict: Verdict): string {
+  if (report.kind === 'result' && report.claimedWinner) {
+    const published = report.claimedWinner === 'A' ? 'B' : 'A';
+    if (verdict === 'reverse') return `Inverter: Equipe ${report.claimedWinner} venceu`;
+    if (verdict === 'keep') return `Manter: Equipe ${published} venceu`;
+  }
+  return verdictNames[verdict];
+}
+
+/** Painel do ticket (denúncia ou recurso de resultado), com o voto de cada conselheiro ao vivo. */
 export function reportPresentation(report: Report, accusedName: string): PanelPayload {
+  const contest = report.kind === 'result';
+  const title = `${contest ? 'RECURSO DE RESULTADO' : 'DENÚNCIA'} #${reportCode(report.id)}`;
+  const matchCode = String(report.matchId).padStart(4, '0');
   const status = report.status === 'open' ? 'EM VOTAÇÃO' : report.status === 'tied' ? 'EMPATE · AGUARDANDO UM ADMIN' : 'ENCERRADO';
   const voters = Object.entries(report.ballots);
+  const tally = new Map<Verdict, number>();
+  for (const [, verdict] of voters) tally.set(verdict, (tally.get(verdict) ?? 0) + 1);
+  const ranking = [...tally].sort((a, b) => b[1] - a[1]);
+  const leader = ranking.length && (ranking.length === 1 || ranking[0][1] > ranking[1][1]) ? ranking[0][0] : null;
+  const published = report.claimedWinner === 'A' ? 'B' : 'A';
   const description = [
-    `**DENÚNCIA #${reportCode(report.id)}** · ${status}`,
-    `Acusado: <@${report.accusedId}> (**${text(accusedName, 20)}**) · Partida #${String(report.matchId).padStart(4, '0')}`,
+    `**${title}** · ${status}`,
+    contest
+      ? `Partida #${matchCode} · O capitão <@${report.reporters[0]?.id}> diz que a **Equipe ${report.claimedWinner}** venceu. Resultado publicado: Equipe ${published}.`
+      : `Acusado: <@${report.accusedId}> (**${text(accusedName, 20)}**) · Partida #${matchCode}`,
   ];
-  if (report.status === 'open') description.push('', 'Denunciantes: mandem aqui os prints, clipes e links que provam a conduta.',
-    'Conselho: vote no menu abaixo. Com **2 votos ou mais**, qualquer conselheiro encerra o caso e vale a opção mais votada. Empate vai para um admin.');
+  if (report.status === 'open') description.push('', '**Como julgar**',
+    contest ? '**1.** O capitão manda aqui os prints ou clipes do placar, de preferência com o horário da partida.'
+      : '**1.** Quem denunciou manda aqui os prints, clipes e links que provam a conduta.',
+    '**2.** Cada conselheiro escolhe o voto no menu abaixo. Dá para trocar o voto até o caso fechar.',
+    '**3.** Com **2 votos ou mais**, qualquer conselheiro clica em **Encerrar caso**: vale a opção mais votada. Empate vai para um admin.');
   if (report.status === 'tied') description.push('', 'A votação empatou. Um admin escolhe a decisão final no menu abaixo.');
-  if (report.status === 'closed' && report.verdict) description.push('', `Decisão${report.decidedBy === 'admin' ? ' do admin' : ' do Conselho'}: **${verdictNames[report.verdict]}**.`);
-  const embed = baseEmbed(`DENÚNCIA #${reportCode(report.id)}`, description.join('\n')).addFields(
-    { name: `DENÚNCIAS · ${report.reporters.length}/3`, value: report.reporters.map(reporter => `<@${reporter.id}>: ${text(reporter.reason, 280)}`).join('\n\n') },
-    { name: `VOTOS DO CONSELHO · ${voters.length}`, value: !voters.length ? 'Nenhum voto ainda.' : report.status === 'open'
-      ? `Já votaram: ${voters.map(([id]) => `<@${id}>`).join(', ')}. Os votos aparecem quando o caso fechar.`
-      : voters.map(([id, verdict]) => `<@${id}>: ${verdictNames[verdict]}`).join('\n') },
+  if (report.status === 'closed' && report.verdict) {
+    description.push('', `Decisão${report.decidedBy === 'admin' ? ' do admin' : ' do Conselho'}: **${verdictLabel(report, report.verdict)}**.`);
+    if (contest && report.verdict === 'reverse') description.push('O resultado e o Elo da partida foram corrigidos.');
+  }
+  const embed = baseEmbed(title, description.join('\n')).addFields(
+    contest
+      ? { name: 'MOTIVO DO RECURSO', value: text(report.reporters[0]?.reason ?? '—', 900) }
+      : { name: `DENÚNCIAS · ${report.reporters.length}/3`, value: report.reporters.map(reporter => `<@${reporter.id}>: ${text(reporter.reason, 280)}`).join('\n\n') },
+    { name: `VOTOS DO CONSELHO · ${voters.length}`, value: !voters.length ? 'Nenhum voto ainda.' : [
+      `Placar: ${ranking.map(([verdict, votes]) => `${verdictLabel(report, verdict)} **${votes}**`).join(' · ')}`,
+      ...voters.map(([id, verdict]) => `<@${id}>: ${verdictLabel(report, verdict)}`),
+    ].join('\n').slice(0, 1024) },
   );
-  const options = VERDICTS.map(verdict => ({ label: verdictNames[verdict], value: verdict }));
+  const options = (contest ? RESULT_VERDICTS : VERDICTS).map(verdict => ({ label: verdictLabel(report, verdict), value: verdict }));
+  const missing = Math.max(0, 2 - voters.length);
+  const closeLabel = missing ? `Encerrar caso (falta${missing > 1 ? 'm' : ''} ${missing} voto${missing > 1 ? 's' : ''})`
+    : leader ? `Encerrar caso · vence: ${verdictLabel(report, leader)}` : 'Encerrar caso · empate vai para um admin';
   const components: Row[] = [];
   if (report.status === 'open') components.push(
     new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(new StringSelectMenuBuilder().setCustomId(`mm:t:${report.id}:vote`)
-      .setPlaceholder('Conselho: seu voto (pode trocar até o fechamento)').setMinValues(1).setMaxValues(1).addOptions(options)),
+      .setPlaceholder('Conselho: escolha seu voto').setMinValues(1).setMaxValues(1).addOptions(options)),
     new ActionRowBuilder<ButtonBuilder>().addComponents(new ButtonBuilder().setCustomId(`mm:t:${report.id}:close`)
-      .setLabel('Encerrar caso').setStyle(ButtonStyle.Danger).setDisabled(voters.length < 2)));
+      .setLabel(closeLabel.slice(0, 80)).setStyle(ButtonStyle.Danger).setDisabled(missing > 0)));
   if (report.status === 'tied') components.push(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(new StringSelectMenuBuilder()
     .setCustomId(`mm:t:${report.id}:decide`).setPlaceholder('Admin: decisão final').setMinValues(1).setMaxValues(1).addOptions(options)));
   return { content: '', embeds: [embed], components, allowedMentions: NO_MENTIONS };

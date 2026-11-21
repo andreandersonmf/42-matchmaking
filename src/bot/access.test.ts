@@ -83,5 +83,7 @@ test('ids de denúncia: botão, menu, formulário e ticket', () => {
   assert.deepEqual(parseCustomId('mm:t:7:vote'), { kind: 'ticket', reportId: 7, action: 'vote' });
   assert.deepEqual(parseCustomId('mm:t:7:close'), { kind: 'ticket', reportId: 7, action: 'close' });
   assert.deepEqual(parseCustomId('mm:t:7:decide'), { kind: 'ticket', reportId: 7, action: 'decide' });
-  for (const bad of ['mm:r:42:123', 'mm:t:0:vote', 'mm:t:7:delete', 'mm:m:42:reports']) assert.equal(parseCustomId(bad), null);
+  assert.deepEqual(parseCustomId('mm:m:42:contest'), { kind: 'contest', matchId: 42 });
+  assert.deepEqual(parseCustomId('mm:c:42'), { kind: 'contestform', matchId: 42 });
+  for (const bad of ['mm:r:42:123', 'mm:t:0:vote', 'mm:t:7:delete', 'mm:m:42:reports', 'mm:c:0', 'mm:c:42:x']) assert.equal(parseCustomId(bad), null);
 });

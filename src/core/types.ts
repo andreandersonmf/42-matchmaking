@@ -140,11 +140,17 @@ export interface MatchFilter {
 }
 
 export const VERDICTS = ['innocent', 'warning', 'elo:25', 'elo:50', 'elo:100', 'susp:1', 'susp:3', 'susp:7'] as const;
-export type Verdict = typeof VERDICTS[number];
+/** Votos de um recurso de resultado: manter o resultado publicado ou inverter o vencedor. */
+export const RESULT_VERDICTS = ['keep', 'reverse'] as const;
+export type Verdict = typeof VERDICTS[number] | typeof RESULT_VERDICTS[number];
 export type ReportStatus = 'open' | 'tied' | 'closed';
 
 export interface Report {
   id: number;
+  /** 'result' = recurso do capitão contra o resultado publicado. Ausente em denúncias antigas (= 'player'). */
+  kind?: 'player' | 'result';
+  /** No recurso: o time que o capitão diz ter vencido. */
+  claimedWinner?: Team;
   status: ReportStatus;
   matchId: number;
   accusedId: string;
@@ -196,6 +202,7 @@ export interface ServiceContract {
   adjustElo(actorId: string, playerId: string, amount: number, reason: string): Promise<Player>;
   tick(): Promise<Match[]>;
   openReport(matchId: number, reporterId: string, accusedId: string, reason: string): Promise<{ report: Report; created: boolean }>;
+  openContest(matchId: number, captainId: string, reason: string): Promise<Report>;
   attachReport(id: number, channelId: string, messageId: string): Promise<void>;
   getReport(id: number): Promise<Report | null>;
   voteReport(id: number, voterId: string, verdict: Verdict): Promise<Report>;
