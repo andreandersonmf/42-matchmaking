@@ -22,7 +22,7 @@ export function rankingSvg(players: RankedPlayer[]): string {
       <circle cx="132" cy="${y + 12}" r="26" fill="#21232e" stroke="${rankColor}" stroke-width="2"/>
       <text x="176" y="${y + 10}" fill="#f6f6f8" font-size="18" font-weight="700">${label(player.robloxName, 22)}</text>
       <text x="176" y="${y + 30}" fill="${rankColor}" font-size="12" font-weight="650">${player.position === 'spiker' ? 'SPIKER' : 'SETTER'} · ${label(rankNamePt(player.rank.name), 26)}</text>
-      <text x="1038" y="${y + 17}" fill="#ffffff" font-size="21" font-weight="800" text-anchor="end">${number(player.elo)}</text>
+      <text x="1038" y="${y + 17}" fill="#ffffff" font-size="21" font-weight="800" text-anchor="end">${number(player.lp)} PDL</text>
       <text x="1038" y="${y + 33}" fill="#797c91" font-size="11" text-anchor="end">${number(player.wins)} vitórias · ${number(player.mvps)} MVPs</text>
     </g>`;
   }).join('');

@@ -27,12 +27,12 @@ function teamRows(players: MatchPlayer[], team: Team, x0: number, mvpId: string 
     const color = rankColor(rankFor(player.elo).rank.color);
     const isMvp = player.discordId === mvpId;
     const delta = player.eloDelta === null ? '<tspan fill="#797c91">—</tspan>'
-      : `<tspan fill="${player.eloDelta >= 0 ? '#4cc38a' : '#f04455'}">${player.eloDelta >= 0 ? '+' : ''}${number(player.eloDelta)}</tspan>`;
+      : `<tspan fill="${player.eloDelta >= 0 ? '#4cc38a' : '#f04455'}">${player.eloDelta >= 0 ? '+' : ''}${number(player.eloDelta)} PDL</tspan>`;
     return `<g>
       <circle cx="${x0 + 26}" cy="${y + 12}" r="20" fill="#21232e" stroke="${isMvp ? '#ffd166' : '#30313d'}" stroke-width="2"/>
       <text x="${x0 + 56}" y="${y + 16}" fill="${isMvp ? '#ffd166' : '#f6f6f8'}" font-size="15" font-weight="700">${label(player.robloxName, 20)}${player.isCaptain ? '<tspan dx="6" fill="#ef4053">[C]</tspan>' : ''}</text>
       <text x="${x0 + 56}" y="${y + 33}" fill="${color}" font-size="11" font-weight="650">${player.position === 'spiker' ? 'SPIKER' : 'SETTER'} · ${label(rankNamePt(rankFor(player.elo).rank.name), 24)}</text>
-      <text x="${x0 + 472}" y="${y + 16}" fill="#ffffff" font-size="16" font-weight="800" text-anchor="end">${number(player.elo)}</text>
+      <text x="${x0 + 472}" y="${y + 16}" fill="#ffffff" font-size="16" font-weight="800" text-anchor="end">${number(rankFor(player.elo).lp)} PDL</text>
       <text x="${x0 + 472}" y="${y + 33}" font-size="11" text-anchor="end">${delta}</text>
     </g>`;
   }).join('');

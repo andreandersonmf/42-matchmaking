@@ -17,7 +17,10 @@ export interface Player {
   robloxId: string;
   robloxName: string;
   position: Position;
+  /** Pontos da escada: tier + divisão + PDL (100 por divisão). */
   elo: number;
+  /** MMR oculto. Ausente em contas antigas: vale o próprio `elo`. */
+  mmr?: number;
   wins: number;
   losses: number;
   matches: number;
@@ -37,6 +40,8 @@ export interface RankedPlayer extends Player {
   rank: Rank;
   nextRank: Rank | null;
   progress: number;
+  /** PDL dentro da divisão (no Mestre e acima, PDL total desde o Mestre). */
+  lp: number;
   standing: number;
 }
 
@@ -53,10 +58,14 @@ export interface MatchPlayer {
   /** Saiu da partida antes do jogo; pode ser trocado. */
   left?: boolean;
   elo: number;
+  /** MMR no início da partida. Ausente em partidas antigas. */
+  mmr?: number;
   vip: VipTier;
   team: Team | null;
   isCaptain: boolean;
   eloDelta: number | null;
+  /** Quanto o MMR (oculto) andou no fechamento; usado para desfazer um resultado invertido. */
+  mmrDelta?: number;
   mvpVotes: number;
 }
 

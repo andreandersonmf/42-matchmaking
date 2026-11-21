@@ -1,7 +1,7 @@
 import sharp from 'sharp';
 import type { PlayerProfile } from '../core/types.js';
 import { fetchAvatar } from './roblox.js';
-import { rankNamePt, vipNames } from './presentation.js';
+import { rankLabel, rankNamePt, vipNames } from './presentation.js';
 import { drawable, FONT_STACK, svgToPng } from './render.js';
 
 export const PROFILE_WIDTH = 1100;
@@ -60,21 +60,21 @@ export function profileSvg(profile: PlayerProfile): string {
     <rect x="254" y="233" width="184" height="29" rx="7" fill="#262630"/>
     <circle cx="269" cy="248" r="4" fill="${rankColor}"/>
     <text x="282" y="253" fill="${rankColor}" font-size="13" font-weight="700">${label(rankNamePt(player.rank.name), 24)}</text>
-    <text x="1046" y="175" fill="#ffffff" text-anchor="end" font-size="43" font-weight="800">${number(player.elo)}</text>
-    <text x="1044" y="199" fill="#ef4053" text-anchor="end" font-size="12" letter-spacing="3">RATING ELO</text>
-    <text x="1045" y="252" fill="#999bac" text-anchor="end" font-size="12">${player.nextRank ? `${label(rankNamePt(player.nextRank.name))} · ${number(Math.max(0, player.nextRank.min - player.elo))} Elo para subir` : 'Rank máximo alcançado'}</text>
+    <text x="1046" y="175" fill="#ffffff" text-anchor="end" font-size="43" font-weight="800">${number(player.lp)}</text>
+    <text x="1044" y="199" fill="#ef4053" text-anchor="end" font-size="12" letter-spacing="3">PDL</text>
+    <text x="1045" y="252" fill="#999bac" text-anchor="end" font-size="12">${player.nextRank ? `${number(Math.max(0, 100 - player.lp))} PDL para ${label(rankNamePt(player.nextRank.name))}` : 'Top 30 com 100+ PDL: Grão-Mestre · Top 10 com 300+: Desafiante'}</text>
     <rect x="254" y="276" width="792" height="6" rx="3" fill="#2a2b35"/>
     <rect x="254" y="276" width="${792 * progress / 100}" height="6" rx="3" fill="url(#accent)"/>
     <path d="M54 313H1046" stroke="#2a2b36"/>
     ${stats.map((stat, index) => `<g transform="translate(${54 + index * 160},338)"><rect width="144" height="111" rx="13" fill="#1d1f29" stroke="#2c2e3a"/><text x="17" y="27" fill="#9698ab" font-size="11" letter-spacing="1.5">${label(stat.title)}</text><text x="17" y="69" fill="#f9f9fb" font-size="32" font-weight="750">${label(stat.value)}</text><text x="17" y="93" fill="#797c91" font-size="11">${label(stat.note)}</text></g>`).join('')}
-    <text x="739" y="347" fill="#a9aabc" font-size="11" letter-spacing="2">EVOLUÇÃO DE ELO</text>
+    <text x="739" y="347" fill="#a9aabc" font-size="11" letter-spacing="2">EVOLUÇÃO NA ESCADA</text>
     <path d="M740 384H1042M740 415H1042" stroke="#282a36" stroke-dasharray="3 5"/>
     <polygon points="740,449 ${points} 1042,449" fill="url(#area)"/>
     <polyline points="${points}" fill="none" stroke="#ef4053" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
     <text x="54" y="491" fill="#787c91" font-size="10" letter-spacing="2">POSIÇÃO</text>
     <text x="54" y="517" fill="#eeeeF4" font-size="18" font-weight="650">${player.position === 'spiker' ? 'SPIKER' : 'SETTER'}</text>
-    <text x="255" y="491" fill="#787c91" font-size="10" letter-spacing="2">MELHOR ELO</text>
-    <text x="255" y="517" fill="#eeeeF4" font-size="18" font-weight="650">${number(player.bestElo)}</text>
+    <text x="255" y="491" fill="#787c91" font-size="10" letter-spacing="2">MELHOR RANK</text>
+    <text x="255" y="517" fill="#eeeeF4" font-size="18" font-weight="650">${label(rankLabel(player.bestElo), 24)}</text>
     <text x="455" y="491" fill="#787c91" font-size="10" letter-spacing="2">SEQUÊNCIA ATUAL</text>
     <text x="455" y="517" fill="#eeeeF4" font-size="18" font-weight="650">${number(player.streak)}</text>
     <text x="739" y="491" fill="#787c91" font-size="10" letter-spacing="2">MEMBRO ${label(vipNames[player.vip])}</text>

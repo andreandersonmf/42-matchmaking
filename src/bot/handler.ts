@@ -3,7 +3,7 @@ import { DomainError } from '../core/engine.js';
 import type { Match, Position, ServiceContract, Team, VipTier } from '../core/types.js';
 import type { BotEnvironment } from './env.js';
 import { BotError, errorDetail, parseCustomId, requireOwner, requireParticipant, requireStaff, safeError, selectedPlayer, type Actor } from './access.js';
-import { baseEmbed, draftCandidates, NO_MENTIONS, plain, replaceable, queuePresentation, relativeTime, rolePrompt, text, vipNames } from './presentation.js';
+import { baseEmbed, draftCandidates, NO_MENTIONS, plain, rankLabel, replaceable, queuePresentation, relativeTime, rolePrompt, text, vipNames } from './presentation.js';
 import { createRoom } from './voice.js';
 import { createReportHandler } from './reports.js';
 import { renderProfile } from './profile.js';
@@ -238,7 +238,7 @@ ${note}` : ''}`);
         const player = await service.adjustElo(actor!.id, options.getUser('usuario', true).id, amount, reason);
         await updateQueue();
         const note = deps.syncRoles ? await deps.syncRoles(player.discordId, player.elo) : undefined;
-        await info(interaction, 'ELO AJUSTADO', `**${text(player.robloxName)}** agora tem **${player.elo} Elo**.${note ? `\n${note}` : ''}\nVariação solicitada: **${amount >= 0 ? '+' : ''}${amount}**.\nMotivo: ${text(reason, 300)}\n\nAutor e motivo foram enviados à auditoria da engine.`);
+        await info(interaction, 'ELO AJUSTADO', `**${text(player.robloxName)}** agora está em **${rankLabel(player.elo)}**.${note ? `\n${note}` : ''}\nVariação solicitada: **${amount >= 0 ? '+' : ''}${amount}**.\nMotivo: ${text(reason, 300)}\n\nAutor e motivo foram enviados à auditoria da engine.`);
         return;
       }
       default:
@@ -322,7 +322,7 @@ ${note}` : ''}`);
           components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(new StringSelectMenuBuilder()
             .setCustomId(`mm:m:${match.id}:subin:${out.discordId}`).setPlaceholder('Escolha quem entra').setMinValues(1).setMaxValues(1)
             .addOptions(candidates.map(player => ({ label: plain(player.robloxName, 40), value: player.discordId,
-              description: `${player.position === 'spiker' ? 'Spiker' : 'Setter'} · ${player.elo} Elo` }))))] });
+              description: `${player.position === 'spiker' ? 'Spiker' : 'Setter'} · ${rankLabel(player.elo)}` }))))] });
         return;
       }
       if (action.kind !== 'subin') throw new BotError('Controle de troca inválido.');

@@ -8,6 +8,7 @@ import { actorResolver, createInteractionHandler } from './handler.js';
 import { hostPanel, NO_MENTIONS } from './presentation.js';
 import { DiscordTransport, Lifecycle, Publisher } from './publisher.js';
 import { syncAllEloRoles, syncEloRoles } from './roles.js';
+import { MASTER_MIN } from '../core/ranks.js';
 import { publishVerifyGuide, verificationApplier } from './verify.js';
 import { callSyncer, QUEUE_CALL, syncCalls } from './voice.js';
 import { errorDetail } from './access.js';
@@ -38,20 +39,21 @@ export async function startBot(): Promise<(() => void) | undefined> {
     try {
       const guild = await client.guilds.fetch(config.guildId);
       const member = await guild.members.fetch({ user: userId, force: true });
-      return await syncEloRoles(guild, member, elo);
+      return await syncEloRoles(guild, member, (await service.getRankedPlayer(userId))?.rank.name ?? elo);
     } catch {
       return 'os cargos de Elo não puderam ser sincronizados agora';
     }
   };
   const afterTick = async (changed: Match[]): Promise<void> => {
     const guild = await client.guilds.fetch(config.guildId);
-    const ids = [...new Set(changed.flatMap(match => match.players.map(player => player.discordId)))];
-    for (const id of ids) {
+    // Desafiante e Grão-Mestre dependem da posição no ranking: quem é Mestre+ também é ressincronizado.
+    const players = await service.listPlayers();
+    const ids = new Set(changed.flatMap(match => match.players.map(player => player.discordId)));
+    const settled = changed.some(match => match.status === 'completed');
+    for (const record of players.filter(player => ids.has(player.discordId) || (settled && player.elo >= MASTER_MIN))) {
       try {
-        const record = await service.getPlayer(id);
-        if (!record) continue;
-        const member = await guild.members.fetch({ user: id, force: true });
-        await syncEloRoles(guild, member, record.elo);
+        const member = await guild.members.fetch({ user: record.discordId, force: true });
+        await syncEloRoles(guild, member, record.rank.name);
       } catch {
         console.warn('Não foi possível sincronizar o cargo de Elo de um participante. Nova tentativa no próximo ciclo.');
       }

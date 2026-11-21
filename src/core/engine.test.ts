@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { autofillDelta, autofillGain, MatchmakingService, pickPlayers } from './engine.js';
-import { calculateElo, rankFor, RANKS } from './ranks.js';
+import { applyLp, calculateElo, ladderRanks, rankFor, RANKS, START_ELO } from './ranks.js';
 import type { Match, Position } from './types.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -177,9 +177,10 @@ test('VIP é registrado na formação e aplicado ao resultado sem bônus nas per
     await service.finishMatch(match.id, 'staff', winner);
     advance(60_000);
     const completed = (await service.tick())[0];
-    assert.equal(completed.players.find(player => player.discordId === '1')!.eloDelta, 35);
+    // Calibração: 2 × 20 PDL, +10% VIP / +15% VIP+ só na vitória.
+    assert.equal(completed.players.find(player => player.discordId === '1')!.eloDelta, 44);
     const vipPlus = completed.players.find(player => player.discordId === '2')!;
-    assert.equal(vipPlus.eloDelta, vipPlus.team === winner ? 37 : -18);
+    assert.equal(vipPlus.eloDelta, vipPlus.team === winner ? 46 : -40);
   } finally { service.close(); }
 });
 
@@ -220,9 +221,10 @@ test('MVP pode ser perdedor, sem autovoto, Elo aplica uma única vez após 60s',
     const completed = (await service.tick())[0];
     assert.equal(completed.mvpId, loser.discordId);
     assert.equal(completed.status, 'completed');
-    assert.equal((await service.getPlayer(loser.discordId))!.elo, 472);
+    // 500 = Prata I com 0 PDL: a derrota (−40 + 4 de MVP) rebaixa para Prata II.
+    assert.equal((await service.getPlayer(loser.discordId))!.elo, 464);
     assert.equal((await service.getPlayer(loser.discordId))!.mvps, 1);
-    assert.equal((await service.getPlayer(voter.discordId))!.elo, 532);
+    assert.equal((await service.getPlayer(voter.discordId))!.elo, 540);
     assert.deepEqual(await service.tick(), []);
     assert.equal((await service.getPlayer(voter.discordId))!.matches, 1);
     await assert.rejects(service.voteMvp(match.id, voter.discordId, loser.discordId), /já terminou/);
@@ -266,12 +268,12 @@ test('VIP tem validade, renovação cumulativa e bônus não altera derrotas', a
     assert.equal(renewed.vipExpiresAt! - first.vipExpiresAt!, 86_400_000);
     advance(2 * 86_400_000);
     assert.equal((await service.getPlayer('1'))!.vip, 'none');
-    const input = { elo: 500, teamAverage: 500, opponentAverage: 500, mvp: false };
-    assert.equal(calculateElo({ ...input, won: true, vip: 'none' }).delta, 16);
-    assert.equal(calculateElo({ ...input, won: true, vip: 'vip' }).delta, 18);
-    assert.equal(calculateElo({ ...input, won: true, vip: 'vip_plus' }).delta, 18);
-    assert.equal(calculateElo({ ...input, won: false, vip: 'vip_plus' }).delta, -16);
-    assert.equal(calculateElo({ ...input, won: true, vip: 'none', calibrating: true }).delta, 32);
+    const input = { elo: 500, mmr: 500, teamAverage: 500, opponentAverage: 500, mvp: false };
+    assert.equal(calculateElo({ ...input, won: true, vip: 'none' }).delta, 20);
+    assert.equal(calculateElo({ ...input, won: true, vip: 'vip' }).delta, 22);
+    assert.equal(calculateElo({ ...input, won: true, vip: 'vip_plus' }).delta, 23);
+    assert.equal(calculateElo({ ...input, won: false, vip: 'vip_plus' }).delta, -20);
+    assert.equal(calculateElo({ ...input, won: true, vip: 'none', calibrating: true }).delta, 40);
   } finally { service.close(); }
 });
 
@@ -288,32 +290,73 @@ test('ajuste de Elo só proprietário, com motivo e fora de partidas ativas', as
   } finally { service.close(); }
 });
 
-test('Elo recompensa surpresa, protege Bronze e nunca fica negativo', () => {
-  const input = { elo: 500, teamAverage: 500, opponentAverage: 500, mvp: false, vip: 'none' as const };
-  assert.ok(calculateElo({ ...input, opponentAverage: 1000, won: true }).delta > calculateElo({ ...input, won: true }).delta);
-  assert.ok(calculateElo({ ...input, opponentAverage: 1000, won: false }).delta > calculateElo({ ...input, won: false }).delta);
-  assert.equal(calculateElo({ ...input, elo: 100, won: false }).delta, -8);
-  assert.equal(calculateElo({ ...input, elo: 3, won: false }).delta, -3);
-  assert.equal(calculateElo({ ...input, elo: 0, won: false }).delta, 0);
-  for (const elo of [0, 3, 7, 10, 100, 500]) {
-    const withoutMvp = calculateElo({ ...input, elo, won: false }).delta;
-    const withMvp = calculateElo({ ...input, elo, won: false, mvp: true }).delta;
-    assert.equal(withMvp - withoutMvp, 4);
-  }
+test('PDL: ±20 parelho, time mais forte vale mais, MVP soma 4 e o MMR anda com K=32', () => {
+  const input = { elo: 500, mmr: 500, teamAverage: 500, opponentAverage: 500, mvp: false, vip: 'none' as const };
+  assert.equal(calculateElo({ ...input, won: false }).delta, -20);
+  assert.equal(calculateElo({ ...input, won: true }).mmrDelta, 16);
+  assert.equal(calculateElo({ ...input, won: false }).mmrDelta, -16);
+  assert.ok(calculateElo({ ...input, opponentAverage: 700, won: true }).delta > 20);
+  assert.ok(calculateElo({ ...input, opponentAverage: 700, won: false }).delta > -20);
+  assert.equal(calculateElo({ ...input, won: false, mvp: true }).delta, -16);
+  assert.equal(calculateElo({ ...input, won: true, mvp: true }).delta, 24);
 });
 
-test('escada de 25 patentes: Silver I–III, Emerald entre Platinum e Diamond, topo Challenger', () => {
+test('MMR acima do rank ganha mais e perde menos; abaixo, o contrário', () => {
+  const even = { teamAverage: 500, opponentAverage: 500, mvp: false, vip: 'none' as const };
+  assert.equal(calculateElo({ ...even, elo: 400, mmr: 500, won: true }).delta, 30);
+  assert.equal(calculateElo({ ...even, elo: 400, mmr: 500, won: false }).delta, -10);
+  assert.equal(calculateElo({ ...even, elo: 600, mmr: 500, won: true }).delta, 10);
+  assert.equal(calculateElo({ ...even, elo: 600, mmr: 500, won: false }).delta, -30);
+  // A diferença conta até 100 de MMR.
+  assert.equal(calculateElo({ ...even, elo: 0, mmr: 500, won: true }).delta, 30);
+});
+
+test('promoção aos 100 PDL, perda para no 0 e com 0 PDL rebaixa, sem proteção', () => {
+  assert.equal(rankFor(290).rank.name, 'Bronze I');
+  assert.equal(rankFor(applyLp(290, 20)).rank.name, 'Silver III');
+  assert.equal(rankFor(applyLp(290, 20)).lp, 10);
+  assert.equal(applyLp(310, -20), 300);
+  assert.equal(rankFor(300).rank.name, 'Silver III');
+  assert.equal(applyLp(300, -20), 280);
+  assert.equal(rankFor(280).rank.name, 'Bronze I');
+  assert.equal(rankFor(280).lp, 80);
+  assert.equal(applyLp(0, -20), 0);
+  assert.equal(applyLp(5, -20), 0);
+  // Mestre não tem divisões: o piso é 0 PDL do Mestre, depois cai para Diamante I.
+  assert.equal(applyLp(2350, -200), 2200);
+  assert.equal(rankFor(applyLp(2200, -20)).rank.name, 'Diamond I');
+});
+
+test('Desafiante = 10 primeiros com 300+ PDL; Grão-Mestre = 20 seguintes com 100+', () => {
+  const players = [...Array.from({ length: 35 }, (_, index) => ({ elo: 2900 - index * 10 })), { elo: 2250 }, { elo: 2000 }];
+  const names = ladderRanks(players).map(info => info.rank.name);
+  assert.deepEqual(names.slice(0, 10), Array(10).fill('Challenger'));
+  assert.deepEqual(names.slice(10, 30), Array(20).fill('Grandmaster'));
+  assert.deepEqual(names.slice(30), [...Array(6).fill('Master'), 'Diamond II']);
+  // Sem o PDL mínimo a vaga fica vazia: 250 PDL no topo é Grão-Mestre, 50 PDL é Mestre.
+  assert.deepEqual(ladderRanks([{ elo: 2450 }, { elo: 2250 }]).map(info => info.rank.name), ['Grandmaster', 'Master']);
+});
+
+test('migração: o Elo atual vira tier + divisão + PDL sem perder nada', () => {
+  assert.deepEqual([START_ELO, 263, 199, 100, 0].map(elo => { const info = rankFor(elo); return `${info.rank.name} ${info.lp}`; }),
+    ['Bronze I 0', 'Bronze I 63', 'Bronze II 99', 'Bronze II 0', 'Bronze III 0']);
+  for (let elo = 0; elo < 2200; elo += 37) assert.equal(rankFor(elo).rank.min + rankFor(elo).lp, elo);
+});
+
+test('escada de 25 patentes: divisões como no LoL (IV/III embaixo, I no topo), topo Challenger', () => {
   assert.equal(RANKS.length, 25);
   assert.equal(RANKS.filter(rank => rank.tier === 'Bronze').length, 3);
   assert.equal(RANKS.filter(rank => rank.tier === 'Silver').length, 3);
   assert.equal(RANKS.filter(rank => rank.tier === 'Emerald').length, 4);
-  assert.equal(rankFor(0).rank.name, 'Bronze I');
-  assert.equal(rankFor(350).rank.name, 'Silver I');
+  assert.equal(rankFor(0).rank.name, 'Bronze III');
+  assert.equal(rankFor(350).rank.name, 'Silver III');
   assert.equal(rankFor(350).progress, 50);
-  assert.equal(rankFor(2199).rank.name, 'Diamond IV');
+  assert.equal(rankFor(600).rank.name, 'Gold IV');
+  assert.equal(rankFor(2199).rank.name, 'Diamond I');
   assert.equal(rankFor(2200).rank.name, 'Master');
-  assert.equal(rankFor(2500).rank.name, 'Grandmaster');
-  assert.equal(rankFor(2800).rank.name, 'Challenger');
+  // Só o ranking dá Grão-Mestre/Desafiante; pela escada o topo é Mestre com PDL sem teto.
+  assert.equal(rankFor(5000).rank.name, 'Master');
+  assert.equal(rankFor(5000).lp, 2800);
   assert.equal(rankFor(5000).nextRank, null);
 });
 
@@ -442,6 +485,21 @@ test('2x do autofill só para quem é novo ou fraco na role; derrota sempre pela
   assert.equal(autofillGain(16, { elo: 850, games: 40 }, 1000), 32);
   assert.equal(autofillGain(16, { elo: 1000, games: 40 }, 1000), 16);
   assert.equal(autofillGain(-16, { elo: 1000, games: 40 }, 1000), -8);
+});
+
+test('autofill no PDL: vitória 2x para quem é novo na role; o MMR geral anda só metade', async () => {
+  const { service, advance } = await fixture();
+  try {
+    await service.setPosition('3', 'spiker');
+    const match = await ready(service);
+    const filled = match.players.find(p => p.autofill)!;
+    await service.startMatch(match.id, 'staff');
+    await service.finishMatch(match.id, 'staff', filled.team!);
+    advance(60_000);
+    const done = (await service.tick())[0];
+    assert.equal(done.players.find(p => p.discordId === filled.discordId)!.eloDelta, 80);
+    assert.equal((await service.getPlayer(filled.discordId))!.mmr, 516);
+  } finally { service.close(); }
 });
 
 test('denúncia: até 3 jogadores da partida entram no mesmo ticket, sem repetição', async () => {

@@ -4,7 +4,7 @@ import { createHash, randomBytes, randomInt } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { calculateElo, rankFor, START_ELO } from './ranks.js';
+import { applyLp, calculateElo, ladderRanks, START_ELO } from './ranks.js';
 import type {
   LinkChallenge, Match, MatchFilter, MatchMode, MatchPlayer, Player, Position, RankedPlayer,
   Report, ServiceContract, Team, Verdict, VipTier,
@@ -281,15 +281,16 @@ export class MatchmakingService implements ServiceContract {
     if (!row) return null;
     const player = JSON.parse(row.data) as Player;
     if (player.vipExpiresAt === null || player.vipExpiresAt <= this.now()) player.vip = 'none';
+    player.mmr ??= player.elo;
     return player;
   }
 
   async listPlayers(): Promise<RankedPlayer[]> {
     const ids = await this.rows<{ discord_id: string }>('SELECT discord_id FROM players');
     const players = await Promise.all(ids.map(async row => (await this.getPlayer(row.discord_id))!));
-    return players
-      .sort((a, b) => b.elo - a.elo || b.wins - a.wins || a.joinedAt - b.joinedAt || a.discordId.localeCompare(b.discordId))
-      .map((player, index) => ({ ...player, ...rankFor(player.elo), standing: index + 1 }));
+    players.sort((a, b) => b.elo - a.elo || b.wins - a.wins || a.joinedAt - b.joinedAt || a.discordId.localeCompare(b.discordId));
+    const ranks = ladderRanks(players);
+    return players.map((player, index) => ({ ...player, ...ranks[index], standing: index + 1 }));
   }
 
   async getRankedPlayer(discordId: string) {
@@ -348,7 +349,7 @@ export class MatchmakingService implements ServiceContract {
       assert(!await this.row('SELECT discord_id FROM players WHERE roblox_id=?', link.robloxId), 'Esta conta Roblox já está vinculada a outro jogador.');
       const player: Player = {
         discordId, name: link.name, robloxId: link.robloxId, robloxName: link.robloxName,
-        position: link.position, elo: START_ELO, wins: 0, losses: 0, matches: 0, mvps: 0,
+        position: link.position, elo: START_ELO, mmr: START_ELO, wins: 0, losses: 0, matches: 0, mvps: 0,
         streak: 0, bestElo: START_ELO, vip: 'none', vipExpiresAt: null, joinedAt: this.now(),
       };
       await this.run('INSERT INTO players(discord_id,roblox_id,data) VALUES(?,?,?)', discordId, link.robloxId, JSON.stringify(player));
@@ -477,7 +478,7 @@ export class MatchmakingService implements ServiceContract {
         modeBallots: {}, mvpBallots: {}, draftIndex: 0, readyDeadline: createdAt + READY_MS,
         players: selected.map(player => ({
           discordId: player.discordId, name: player.name, robloxId: player.robloxId, robloxName: player.robloxName,
-          elo: player.elo, position: player.position, autofill: player.autofill, vip: player.vip, team: null, isCaptain: false,
+          elo: player.elo, mmr: player.mmr, position: player.position, autofill: player.autofill, vip: player.vip, team: null, isCaptain: false,
           eloDelta: null, mvpVotes: 0,
         })),
       };
@@ -535,13 +536,13 @@ export class MatchmakingService implements ServiceContract {
     if (match.mode === 'random') {
       teamA = [...shuffle(spikers).slice(0, 4), ...shuffle(setters).slice(0, 2)];
     } else {
-      const totalElo = match.players.reduce((total, player) => total + player.elo, 0);
+      const totalElo = match.players.reduce((total, player) => total + (player.mmr ?? player.elo), 0);
       let bestDifference = Infinity;
       teamA = [];
       for (const fourSpikers of combinations(spikers, 4)) {
         for (const twoSetters of combinations(setters, 2)) {
           const candidate = [...fourSpikers, ...twoSetters];
-          const difference = Math.abs(2 * candidate.reduce((sum, player) => sum + player.elo, 0) - totalElo);
+          const difference = Math.abs(2 * candidate.reduce((sum, player) => sum + (player.mmr ?? player.elo), 0) - totalElo);
           if (difference < bestDifference) { bestDifference = difference; teamA = candidate; }
         }
       }
@@ -763,7 +764,7 @@ export class MatchmakingService implements ServiceContract {
       const player = await this.requiredPlayer(inId);
       Object.assign(slot, {
         discordId: player.discordId, name: player.name, robloxId: player.robloxId, robloxName: player.robloxName,
-        elo: player.elo, vip: player.vip, autofill: player.position !== slot.position, ready: true, left: false, mvpVotes: 0,
+        elo: player.elo, mmr: player.mmr, vip: player.vip, autofill: player.position !== slot.position, ready: true, left: false, mvpVotes: 0,
       });
       delete match.captainBallots?.[outId];
       this.openCaptainVoteIfAllReady(match);
@@ -807,25 +808,31 @@ export class MatchmakingService implements ServiceContract {
     const tieKey = (id: string) => createHash('sha256').update(`mm42:${match.id}:${id}`).digest('hex');
     counts.sort((a, b) => b.votes - a.votes || tieKey(a.id).localeCompare(tieKey(b.id)));
     match.mvpId = counts[0].votes > 0 ? counts[0].id : null;
-    const average = (team: Team) => match.players.filter(player => player.team === team).reduce((sum, player) => sum + player.elo, 0) / 6;
+    // Médias de MMR (oculto); o PDL depende delas e da distância entre o MMR e o rank de cada um.
+    const average = (team: Team) => match.players.filter(player => player.team === team).reduce((sum, player) => sum + (player.mmr ?? player.elo), 0) / 6;
     const averages = { A: average('A'), B: average('B') };
     for (const participant of match.players) {
       assert(participant.team !== null, 'Jogador sem equipe.');
       const player = await this.requiredPlayer(participant.discordId);
+      const mmr = player.mmr ?? player.elo;
       const won = participant.team === match.winner;
       const mvp = participant.discordId === match.mvpId;
-      const base = calculateElo({
-        elo: player.elo, teamAverage: averages[participant.team],
+      const result = calculateElo({
+        elo: player.elo, mmr, teamAverage: averages[participant.team],
         opponentAverage: averages[participant.team === 'A' ? 'B' : 'A'],
         won, mvp, vip: participant.vip, calibrating: player.matches < 5,
-      }).delta;
-      // Elo secreto da role jogada: decide se o autofill ganha 2x (só quem é novo ou fraco nela).
+      });
+      // MMR secreto da role jogada: decide se o autofill ganha 2x de PDL (só quem é novo ou fraco nela).
       const role = await this.row<{ elo: number; games: number }>('SELECT elo, games FROM role_elo WHERE discord_id=? AND role=?', player.discordId, participant.position)
-        ?? { elo: player.elo, games: participant.position === player.position ? player.matches : 0 };
-      const delta = participant.autofill ? autofillGain(base, role, player.elo) : base;
+        ?? { elo: mmr, games: participant.position === player.position ? player.matches : 0 };
       await this.run('INSERT INTO role_elo(discord_id,role,elo,games) VALUES(?,?,?,?) ON CONFLICT(discord_id,role) DO UPDATE SET elo=excluded.elo, games=excluded.games',
-        player.discordId, participant.position, Math.max(0, role.elo + delta), role.games + 1);
-      player.elo += delta;
+        player.discordId, participant.position, Math.max(0, role.elo + result.mmrDelta), role.games + 1);
+      const before = player.elo;
+      player.elo = applyLp(before, participant.autofill ? autofillGain(result.delta, role, mmr) : result.delta);
+      const delta = player.elo - before;
+      // Fora da posição o MMR geral anda só metade: a role jogada já registra o resultado inteiro.
+      player.mmr = Math.max(0, mmr + (participant.autofill ? Math.trunc(result.mmrDelta / 2) : result.mmrDelta));
+      participant.mmrDelta = player.mmr - mmr;
       player.bestElo = Math.max(player.bestElo, player.elo);
       player.matches++;
       player.wins += Number(won);
@@ -877,6 +884,8 @@ export class MatchmakingService implements ServiceContract {
       const player = await this.requiredPlayer(playerId);
       const delta = Math.max(0, player.elo + amount) - player.elo;
       player.elo += delta;
+      // Correção do dono move o MMR junto, para o PDL seguinte não sair distorcido. Punição de denúncia mexe só no PDL.
+      player.mmr = Math.max(0, (player.mmr ?? player.elo - delta) + delta);
       player.bestElo = Math.max(player.bestElo, player.elo);
       await this.savePlayer(player);
       await this.run('INSERT INTO elo_events(discord_id,match_id,at,elo,delta) VALUES(?,NULL,?,?,?)', playerId, this.now(), player.elo, delta);
@@ -1105,6 +1114,7 @@ export class MatchmakingService implements ServiceContract {
       const won = participant.team === oldWinner;
       const before = player.elo;
       player.elo = Math.max(0, before - delta);
+      player.mmr = Math.max(0, (player.mmr ?? before) - (participant.mmrDelta ?? delta));
       player.matches = Math.max(0, player.matches - 1);
       player.wins = Math.max(0, player.wins - Number(won));
       player.losses = Math.max(0, player.losses - Number(!won));
@@ -1113,7 +1123,7 @@ export class MatchmakingService implements ServiceContract {
       if (won) player.streak = Math.max(0, player.streak - 1);
       await this.savePlayer(player);
       const role = await this.row<{ elo: number; games: number }>('SELECT elo, games FROM role_elo WHERE discord_id=? AND role=?', player.discordId, participant.position);
-      if (role) await this.run('UPDATE role_elo SET elo=?, games=? WHERE discord_id=? AND role=?', Math.max(0, role.elo - delta), Math.max(0, role.games - 1), player.discordId, participant.position);
+      if (role) await this.run('UPDATE role_elo SET elo=?, games=? WHERE discord_id=? AND role=?', Math.max(0, role.elo - (participant.mmrDelta ?? delta)), Math.max(0, role.games - 1), player.discordId, participant.position);
       await this.run('INSERT INTO elo_events(discord_id,match_id,at,elo,delta) VALUES(?,?,?,?,?)', player.discordId, match.id, this.now(), player.elo, player.elo - before);
       participant.eloDelta = null;
     }

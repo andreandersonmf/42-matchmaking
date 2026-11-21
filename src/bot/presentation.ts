@@ -24,6 +24,12 @@ export function rankNamePt(name: string): string {
   return numeral ? `${translated} ${numeral}` : translated;
 }
 
+/** "Ouro II · 45 PDL" (Mestre+: PDL desde o Mestre). Desafiante/Grão-Mestre vêm de `rank`, quando o ranking é conhecido. */
+export function rankLabel(elo: number, rank?: string): string {
+  const info = rankFor(elo);
+  return `${rankNamePt(rank ?? info.rank.name)} · ${info.lp} PDL`;
+}
+
 export function plain(value: string, max = 80): string {
   return Array.from(value.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, ' ').replace(/@/g, '＠')).slice(0, max).join('');
 }
@@ -58,7 +64,7 @@ function siteRow(siteUrl?: string): Row[] {
 export function queuePresentation(queue: QueueState, siteUrl?: string): PanelPayload {
   const positions = (position: 'spiker' | 'setter') => {
     const players = queue.players.filter(player => player.position === position);
-    const visible = players.slice(0, 10).map((player, index) => `${index + 1}. **${text(player.robloxName, 20)}** · ${player.elo} Elo${player.vip !== 'none' ? ` · ${vipNames[player.vip]}` : ''}`);
+    const visible = players.slice(0, 10).map((player, index) => `${index + 1}. **${text(player.robloxName, 20)}** · ${rankLabel(player.elo)}${player.vip !== 'none' ? ` · ${vipNames[player.vip]}` : ''}`);
     if (players.length > 10) visible.push(`E mais ${players.length - 10} jogador(es).`);
     return visible.join('\n') || 'Nenhum jogador nesta posição.';
   };
@@ -83,8 +89,8 @@ export function queuePresentation(queue: QueueState, siteUrl?: string): PanelPay
 function playerLine(player: MatchPlayer): string {
   const captain = player.isCaptain ? ' [C]' : '';
   const vip = (player.vip !== 'none' ? ` · ${vipNames[player.vip]}` : '') + (player.autofill ? ' · Autofill' : '');
-  const delta = player.eloDelta === null ? '' : ` · ${player.eloDelta >= 0 ? '+' : ''}${player.eloDelta}`;
-  return `**${text(player.robloxName, 20)}**${captain}${vip}\n${player.position === 'spiker' ? 'Spiker' : 'Setter'} · ${rankNamePt(rankFor(player.elo).rank.name)} · ${player.elo} Elo${delta}`;
+  const delta = player.eloDelta === null ? '' : ` · ${player.eloDelta >= 0 ? '+' : ''}${player.eloDelta} PDL`;
+  return `**${text(player.robloxName, 20)}**${captain}${vip}\n${player.position === 'spiker' ? 'Spiker' : 'Setter'} · ${rankLabel(player.elo)}${delta}`;
 }
 
 export function draftCandidates(match: Match): MatchPlayer[] {
@@ -124,7 +130,7 @@ export function matchPresentation(match: Match, siteUrl?: string, interactive = 
         new StringSelectMenuBuilder().setCustomId(`mm:m:${match.id}:cap:${team ?? 'A'}`).setPlaceholder(team ? `Time ${team}: vote no capitão` : 'Vote no capitão')
           .setMinValues(1).setMaxValues(1).setDisabled(!interactive).addOptions(captainCandidates(match, team).map(player => ({
             label: plain(player.robloxName, 40), value: player.discordId,
-            description: `${player.position === 'spiker' ? 'Spiker' : 'Setter'} · ${player.elo} Elo · ${rankNamePt(rankFor(player.elo).rank.name)}`,
+            description: `${player.position === 'spiker' ? 'Spiker' : 'Setter'} · ${rankLabel(player.elo)}`,
           }))),
       ));
     }
@@ -138,7 +144,7 @@ export function matchPresentation(match: Match, siteUrl?: string, interactive = 
       new StringSelectMenuBuilder().setCustomId(`mm:m:${match.id}:pick`).setPlaceholder(`Capitão da equipe ${match.draftTurn}: escolha um jogador`)
         .setMinValues(1).setMaxValues(1).setDisabled(!interactive).addOptions(candidates.map(player => ({
           label: plain(player.robloxName, 40), value: player.discordId,
-          description: `${player.position === 'spiker' ? 'Spiker' : 'Setter'} · ${player.elo} Elo · ${rankNamePt(rankFor(player.elo).rank.name)}`,
+          description: `${player.position === 'spiker' ? 'Spiker' : 'Setter'} · ${rankLabel(player.elo)}`,
         }))),
     ));
   } else if (match.status === 'ready') {
@@ -173,7 +179,7 @@ export function matchPresentation(match: Match, siteUrl?: string, interactive = 
   if (match.status === 'completed') {
     const mvp = match.players.find(player => player.discordId === match.mvpId);
     description.push('', `Vitória da **Equipe ${match.winner}** · MVP: **${mvp ? text(mvp.robloxName, 20) : 'Sem MVP'}**`,
-      'Partida encerrada. Elo e estatísticas processados pela engine. Consulte seu novo cartão com **/profile**.',
+      'Partida encerrada. PDL e estatísticas processados pela engine. Consulte seu novo cartão com **/profile**.',
       'Resultado errado? O capitão do time que perdeu tem **24 horas** para clicar em **Contestar resultado** e mandar prints ou clipes do placar, de preferência com o horário da partida.');
   } else if (match.status === 'cancelled') {
     description.push('', 'Esta partida foi cancelada. Nenhum resultado foi contabilizado. Consulte o painel para entrar novamente na fila.');
@@ -183,10 +189,10 @@ export function matchPresentation(match: Match, siteUrl?: string, interactive = 
     for (const team of ['A', 'B'] as const) {
       const players = match.players.filter(player => player.team === team);
       const average = players.length ? Math.round(players.reduce((sum, player) => sum + player.elo, 0) / players.length) : 0;
-      embed.addFields({ name: `EQUIPE ${team} · ${players.length}/6 · ${players.filter(player => player.position === 'spiker').length}S / ${players.filter(player => player.position === 'setter').length}L · ${average} Elo`, value: players.map(playerLine).join('\n\n') || 'Aguardando jogadores.', inline: true });
+      embed.addFields({ name: `EQUIPE ${team} · ${players.length}/6 · ${players.filter(player => player.position === 'spiker').length}S / ${players.filter(player => player.position === 'setter').length}L · média ${rankNamePt(rankFor(average).rank.name)}`, value: players.map(playerLine).join('\n\n') || 'Aguardando jogadores.', inline: true });
     }
     const available = match.players.filter(player => player.team === null);
-    if (available.length) embed.addFields({ name: `DISPONÍVEIS · ${available.length}`, value: available.map(player => `${text(player.robloxName, 20)} · ${player.position === 'spiker' ? 'Spiker' : 'Setter'} · ${player.elo} Elo`).join('\n') });
+    if (available.length) embed.addFields({ name: `DISPONÍVEIS · ${available.length}`, value: available.map(player => `${text(player.robloxName, 20)} · ${player.position === 'spiker' ? 'Spiker' : 'Setter'} · ${rankLabel(player.elo)}`).join('\n') });
   } else {
     for (const position of ['spiker', 'setter'] as const) {
       const players = match.players.filter(player => player.position === position);
@@ -239,7 +245,7 @@ export function replaceable(match: Match, now = Date.now()): MatchPlayer[] {
 }
 
 export const verdictNames: Record<Verdict, string> = {
-  innocent: 'Inocente', warning: 'Advertência', 'elo:25': 'Perder 25 de Elo', 'elo:50': 'Perder 50 de Elo', 'elo:100': 'Perder 100 de Elo',
+  innocent: 'Inocente', warning: 'Advertência', 'elo:25': 'Perder 25 PDL', 'elo:50': 'Perder 50 PDL', 'elo:100': 'Perder 100 PDL',
   'susp:1': 'Suspensão da fila: 1 dia', 'susp:3': 'Suspensão da fila: 3 dias', 'susp:7': 'Suspensão da fila: 7 dias',
   keep: 'Manter o resultado', reverse: 'Inverter o resultado',
 };

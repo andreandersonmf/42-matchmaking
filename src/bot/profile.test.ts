@@ -57,6 +57,6 @@ test('rank máximo, zero partidas e histórico vazio geram SVG finito', async ()
   value.eloHistory = [];
   value.player.progress = Number.NaN;
   assert.doesNotMatch(profileSvg(value), /NaN|Infinity/);
-  assert.match(profileSvg(value), /Rank máximo alcançado/);
+  assert.match(profileSvg(value), /Top 30 com 100\+ PDL: Grão-Mestre/);
   assert.equal((await sharp(await renderProfile(value, { avatar: null })).metadata()).width, 1100);
 });
