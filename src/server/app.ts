@@ -2,7 +2,7 @@ import express from 'express';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { DomainError } from '../core/engine.js';
-import { RANKS } from '../core/ranks.js';
+import { hideMmr, RANKS } from '../core/ranks.js';
 import type { MatchFilter, MatchMode, Overview, PublicConfig, ServiceContract } from '../core/types.js';
 
 type AppOptions = {
@@ -14,6 +14,7 @@ type AppOptions = {
 
 export function createApp(service: ServiceContract, options: AppOptions) {
   const app = express();
+  app.set('json replacer', hideMmr);
   app.disable('x-powered-by');
   app.use((_request, response, next) => {
     response.setHeader('X-Content-Type-Options', 'nosniff');

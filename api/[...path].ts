@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { DomainError } from '../src/core/engine.js';
-import { RANKS } from '../src/core/ranks.js';
+import { hideMmr, RANKS } from '../src/core/ranks.js';
 import type { MatchFilter, MatchMode, Overview, PublicConfig } from '../src/core/types.js';
 import { service } from '../src/core/runtime.js';
 import { fetchAvatar } from '../src/bot/roblox.js';
@@ -42,7 +42,7 @@ function rateLimit(request: Request): Response | null {
 }
 
 function json(body: unknown, status = 200, extra: Record<string, string> = {}) {
-  return new Response(JSON.stringify(body), {
+  return new Response(JSON.stringify(body, hideMmr), {
     status,
     headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...securityHeaders, ...extra },
   });

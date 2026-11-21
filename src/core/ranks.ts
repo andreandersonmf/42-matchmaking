@@ -95,3 +95,6 @@ export function calculateElo(input: {
   const mvpBonus = input.mvp ? 4 : 0;
   return { delta: base + vipBonus + mvpBonus, base, vipBonus, mvpBonus, mmrDelta, expected };
 }
+
+/** O MMR é oculto: o site nunca recebe `mmr` nem `mmrDelta` (replacer de JSON.stringify). */
+export const hideMmr = (key: string, value: unknown) => key === 'mmr' || key === 'mmrDelta' ? undefined : value;
